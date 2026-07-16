@@ -1,0 +1,102 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "productionNoDeploy": [
+      "default",
+      "!{projectRoot}/**/*.test.ts",
+      "!{projectRoot}/**/*.test.tsx",
+      "!{projectRoot}/vitest.config.*"
+    ],
+    "production": [
+      "productionNoDeploy",
+      "deployArtifacts",
+      "sharedDeployArtifacts"
+    ],
+    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json"],
+    "sharedDeployArtifacts": [
+      "{workspaceRoot}/infra/app-configs/internal/base-builder.Dockerfile",
+      "{workspaceRoot}/infra/app-configs/internal/application-builds.cloudbuild.yaml"
+    ],
+    "deployArtifacts": [],
+    "viteEnv": [{ "runtime": "printenv | grep '^VITE_' | sort" }]
+  },
+  "pluginsConfig": {
+    "@nx/js": {
+      "projectsAffectedByDependencyUpdates": "auto"
+    }
+  },
+  "plugins": [
+    {
+      "plugin": "@nx/eslint/plugin",
+      "options": {
+        "targetName": "lint"
+      }
+    },
+    {
+      "plugin": "@nx/js/typescript",
+      "options": {
+        "typecheck": {
+          "targetName": "typecheck"
+        },
+        "build": {
+          "targetName": "build",
+          "configName": "tsconfig.lib.json",
+          "buildDepsName": "build-deps",
+          "watchDepsName": "watch-deps"
+        }
+      }
+    }
+  ],
+  "targetDefaults": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["production", "^production", "viteEnv"],
+      "outputs": ["{projectRoot}/out-tsc"],
+      "cache": true
+    },
+    "build:prod": {
+      "dependsOn": ["build"],
+      "inputs": [
+        "production",
+        "^production",
+        "{workspaceRoot}/libs/**/*.yaml",
+        "viteEnv"
+      ],
+      "outputs": ["{projectRoot}/dist"],
+      "cache": true
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "inputs": ["default", "^productionNoDeploy"],
+      "outputs": ["{projectRoot}/coverage"],
+      "cache": true
+    },
+    "test:coverage": {
+      "dependsOn": ["^test:coverage"],
+      "inputs": ["default", "^productionNoDeploy"],
+      "outputs": ["{projectRoot}/coverage"],
+      "cache": true
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "inputs": ["default", "^productionNoDeploy"],
+      "cache": true
+    },
+    "lint": {
+      "inputs": ["default"],
+      "cache": true
+    }
+  },
+  "tui": {
+    "autoExit": true
+  },
+  "sync": {
+    "applyChanges": true,
+    "globalGenerators": ["@nx/js:typescript-sync"]
+  },
+  "parallel": 3,
+  "cacheDirectory": ".nx/cache",
+  "analytics": false,
+  "nxCloudId": "69f8cce54c0d3243197c02df"
+}

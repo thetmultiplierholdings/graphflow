@@ -1,0 +1,406 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./out-tsc",
+    "allowJs": true
+  },
+  "files": ["./vite.config.js", "./vitest.config.mjs", "./vitest.shared.mjs"],
+  "references": [
+    {
+      "path": "./apps/cli-seeder"
+    },
+    {
+      "path": "./apps/platform-cli"
+    },
+    {
+      "path": "./apps/platform-dashboard"
+    },
+    {
+      "path": "./apps/platform-service"
+    },
+    {
+      "path": "./apps/platform-webhooks"
+    },
+    {
+      "path": "./apps/platform-workflows"
+    },
+    {
+      "path": "./libs/platform/ai"
+    },
+    {
+      "path": "./libs/platform/billing"
+    },
+    {
+      "path": "./libs/platform/billing-types"
+    },
+    {
+      "path": "./libs/platform/business-analysis"
+    },
+    {
+      "path": "./libs/platform/business-analysis-types"
+    },
+    {
+      "path": "./libs/platform/business-configuration"
+    },
+    {
+      "path": "./libs/platform/data-acquisition"
+    },
+    {
+      "path": "./libs/platform/organization-management"
+    },
+    {
+      "path": "./libs/platform/platform-service-client"
+    },
+    {
+      "path": "./libs/platform/platform-service-client-auth"
+    },
+    {
+      "path": "./libs/shared/credentials"
+    },
+    {
+      "path": "./libs/shared/email-client"
+    },
+    {
+      "path": "./libs/shared/email-templates"
+    },
+    {
+      "path": "./libs/shared/errors"
+    },
+    {
+      "path": "./libs/shared/fastify"
+    },
+    {
+      "path": "./libs/shared/logger"
+    },
+    {
+      "path": "./libs/shared/postgres"
+    },
+    {
+      "path": "./libs/shared/scripts"
+    },
+    {
+      "path": "./libs/shared/stripe-client"
+    },
+    {
+      "path": "./libs/shared/testing"
+    },
+    {
+      "path": "./libs/shared/types"
+    },
+    {
+      "path": "./libs/shared/xero-client"
+    },
+    {
+      "path": "./libs/shared/feature-flags"
+    },
+    {
+      "path": "./apps/corporate-frontend"
+    },
+    {
+      "path": "./libs/platform/report-diff"
+    },
+    {
+      "path": "./libs/shared/result"
+    },
+    {
+      "path": "./libs/shared/orpc-errors"
+    },
+    {
+      "path": "./libs/platform/storage"
+    },
+    {
+      "path": "./libs/shared/workflows"
+    },
+    {
+      "path": "./libs/shared/bigquery"
+    },
+    {
+      "path": "./apps/corporate-api"
+    },
+    {
+      "path": "./apps/tax-api"
+    },
+    {
+      "path": "./libs/tax/warden"
+    },
+    {
+      "path": "./libs/tax/fbar"
+    },
+    {
+      "path": "./libs/shared/client-auth"
+    },
+    {
+      "path": "./libs/shared/client-fields"
+    },
+    {
+      "path": "./libs/shared/jobs"
+    },
+    {
+      "path": "./libs/shared/companies-house-client"
+    },
+    {
+      "path": "./apps/corporate-dataservice"
+    },
+    {
+      "path": "./libs/platform/corporate-dataservice-client"
+    },
+    {
+      "path": "./libs/shared/notifications"
+    },
+    {
+      "path": "./libs/shared/two-factor"
+    },
+    {
+      "path": "./libs/shared/versioned-schema"
+    },
+    {
+      "path": "./libs/corporate/corp-feature-flags"
+    },
+    {
+      "path": "./libs/shared/karbon"
+    },
+    {
+      "path": "./libs/platform/ai-chat"
+    },
+    {
+      "path": "./libs/shared/hmrc-client"
+    },
+    {
+      "path": "./libs/shared/json"
+    },
+    {
+      "path": "./libs/shared/yaml"
+    },
+    {
+      "path": "./libs/platform/platform-service-server"
+    },
+    {
+      "path": "./libs/shared/hmrc-utils"
+    },
+    {
+      "path": "./libs/platform/batch"
+    },
+    {
+      "path": "./libs/platform/information-search"
+    },
+    {
+      "path": "./apps/knowledge-service"
+    },
+    {
+      "path": "./apps/internal-notifier"
+    },
+    {
+      "path": "./apps/internal-webhooks"
+    },
+    {
+      "path": "./libs/platform/information-search-service-client"
+    },
+    {
+      "path": "./libs/corporate/corp-ai-prompts"
+    },
+    {
+      "path": "./libs/platform/audit-logging"
+    },
+    {
+      "path": "./libs/shared/resilient-fetch"
+    },
+    {
+      "path": "./libs/shared/timesheet"
+    },
+    {
+      "path": "./libs/platform/eval-dataset"
+    },
+    {
+      "path": "./libs/platform/api-contracts"
+    },
+    {
+      "path": "./libs/platform/api-clients"
+    },
+    {
+      "path": "./libs/platform/organization-management-types"
+    },
+    {
+      "path": "./apps/platform-component-browser"
+    },
+    {
+      "path": "./libs/platform/platform-feature-flags"
+    },
+    {
+      "path": "./apps/internal-mca-service"
+    },
+    {
+      "path": "./libs/shared/cldr-data"
+    },
+    {
+      "path": "./apps/tax-frontend"
+    },
+    {
+      "path": "./libs/platform/design-system"
+    },
+    {
+      "path": "./apps/platform-bi"
+    },
+    {
+      "path": "./libs/platform/bigquery-reporting"
+    },
+    {
+      "path": "./libs/shared/id-generator"
+    },
+    {
+      "path": "./libs/shared/injection"
+    },
+    {
+      "path": "./libs/shared/flavor"
+    },
+    {
+      "path": "./libs/shared/concurrency"
+    },
+    {
+      "path": "./libs/shared/monetary"
+    },
+    {
+      "path": "./libs/shared/decimal-testing"
+    },
+    {
+      "path": "./libs/platform/frontend-contracts"
+    },
+    {
+      "path": "./apps/platform-frontend"
+    },
+    {
+      "path": "./libs/shared/account-types"
+    },
+    {
+      "path": "./libs/shared/date"
+    },
+    {
+      "path": "./libs/shared/i18n"
+    },
+    {
+      "path": "./libs/platform/platform-service-auth-provider"
+    },
+    {
+      "path": "./libs/scripts/docsdb"
+    },
+    {
+      "path": "./libs/shared/fetch-interceptors"
+    },
+    {
+      "path": "./libs/shared/sdk-wrapper"
+    },
+    {
+      "path": "./libs/shared/karbon-sync"
+    },
+    {
+      "path": "./libs/shared/metrics"
+    },
+    {
+      "path": "./libs/platform/business-configuration-types"
+    },
+    {
+      "path": "./libs/shared/authz"
+    },
+    {
+      "path": "./libs/shared/organization-identity"
+    },
+    {
+      "path": "./libs/platform/lib-agents"
+    },
+    {
+      "path": "./libs/platform/lib-client-assistant"
+    },
+    {
+      "path": "./libs/scripts/eval"
+    },
+    {
+      "path": "./libs/platform/mcp-server"
+    },
+    {
+      "path": "./libs/corporate/corp-api-contracts"
+    },
+    {
+      "path": "./libs/scripts/vitest-metrics-reporters"
+    },
+    {
+      "path": "./libs/platform/corp-dataservice-contracts"
+    },
+    {
+      "path": "./libs/platform/information-search-contracts"
+    },
+    {
+      "path": "./libs/platform/ai-chat-protocol"
+    },
+    {
+      "path": "./libs/shared/authz-fastify"
+    },
+    {
+      "path": "./libs/platform/organization-management-authz"
+    },
+    {
+      "path": "./libs/shared/notification-schemas"
+    },
+    {
+      "path": "./libs/platform/corp-mutation-contracts"
+    },
+    {
+      "path": "./libs/shared/email"
+    },
+    {
+      "path": "./libs/platform/extracted-data"
+    },
+    {
+      "path": "./libs/kip/knowledge-intelligence"
+    },
+    {
+      "path": "./libs/corporate/management-accounts-assistant"
+    },
+    {
+      "path": "./libs/shared/audit-context"
+    },
+    {
+      "path": "./libs/shared/pagination"
+    },
+    {
+      "path": "./apps/tax-dataservice"
+    },
+    {
+      "path": "./libs/platform/org-management-contracts"
+    },
+    {
+      "path": "./libs/shared/communication"
+    },
+    {
+      "path": "./libs/kip/contracts"
+    },
+    {
+      "path": "./libs/platform/rd-claims"
+    },
+    {
+      "path": "./libs/shared/communication-ingestion"
+    },
+    {
+      "path": "./libs/shared/tenancy"
+    },
+    {
+      "path": "./libs/platform/service-catalogue"
+    },
+    {
+      "path": "./libs/platform/big-for-each"
+    },
+    {
+      "path": "./libs/platform/tax-dataservice-contracts"
+    },
+    {
+      "path": "./libs/platform/tax-dataservice-client"
+    },
+    {
+      "path": "./libs/platform/agent-workflows"
+    },
+    {
+      "path": "./apps/infra-sandbox-exec"
+    },
+    {
+      "path": "./libs/platform/lib-client-assistant-demo"
+    }
+  ]
+}

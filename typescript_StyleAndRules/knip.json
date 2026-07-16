@@ -1,0 +1,54 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.js", "scripts/*.sh"],
+      "ignoreDependencies": ["nx"]
+    },
+    "apps/platform-cli": {
+      "entry": ["src/cli.ts", "src/**/*.test.ts"]
+    },
+    "apps/platform-service": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/platform/bigquery-reporting": {
+      "entry": ["src/index.ts", "src/index.node.ts", "src/**/*.test.ts"]
+    },
+    "libs/platform/data-acquisition": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/platform/business-operations": {
+      "entry": ["src/**/*.test.ts"]
+    },
+    "libs/platform/organization-management-authz": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/shared/authz": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/shared/authz-fastify": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/shared/logger": {
+      "entry": ["src/index.ts"]
+    },
+    "libs/shared/errors": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/shared/result": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "libs/shared/types": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    }
+  },
+  "ignore": [
+    "**/*.d.ts",
+    "**/vitest.config.*",
+    "**/tsconfig.*",
+    "coverage/**",
+    "out-tsc/**",
+    "node_modules/**"
+  ],
+  "ignoreDependencies": ["@types/*", "typescript", "vitest", "tsx"]
+}

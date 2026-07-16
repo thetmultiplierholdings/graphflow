@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "arcanis.vscode-zipfs",
+    "dbaeumer.vscode-eslint",
+    "vitest.explorer",
+    "biomejs.biome",
+    "hashicorp.terraform"
+  ]
+}

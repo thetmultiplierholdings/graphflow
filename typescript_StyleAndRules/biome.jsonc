@@ -1,0 +1,239 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.3.11/schema.json",
+  "extends": ["ultracite/core", "ultracite/react"],
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "**/*.js",
+      "**/*.ts",
+      "**/*.jsx",
+      "**/*.tsx",
+      "**/*.json",
+      "**/*.jsonc",
+      "!!**/openapi.json",
+      "!!libs/platform/api-contracts/openapi",
+      "!!apps/platform-documentation/specs",
+      // Generated dashboard JSON (yarn generate:dashboards); byte-stable renderer output, not hand-formatted
+      "!!infra/terraform/modules/monitoring/dashboards",
+      "!!**/*.html",
+      "!!**/.cursor",
+      "!!.claude", // relative, not **/.claude, so biome runs in worktrees at .claude/worktrees/
+      "!!**/.git",
+      "!!**/.nx",
+      "!!**/.rollup.cache",
+      "!!**/.yarn",
+      "!!**/build",
+      "!!**/coverage",
+      "!!**/data/development/ledger",
+      "!!**/dist",
+      "!!**/dist-static",
+      "!!**/generated",
+      "!!**/migrations",
+      "!!**/node_modules",
+      "!!**/out-tsc",
+      "!!**/public",
+      "!!**/tmp",
+      "!!**/tsconfig.lib.json",
+      "!!**/workflow-bundle.js",
+      "!!**/generated-workflow-schemas/WorkflowSchemas.ts",
+      // Warden import (warden) is lift-and-shift; see warden/IMPORT_NOTES.md
+      "!!warden",
+      // Local git worktrees (gitignored); each carries its own biome root config
+      "!!**/.worktrees"
+    ],
+    "maxSize": 2097152 // 2MB
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "complexity": {
+        /* The forEach method is commonly used */
+        "noForEach": "off",
+        /* Use void signatures for readability */
+        "noVoid": "off"
+      },
+      "correctness": {
+        "noUnusedVariables": "error",
+        "useExhaustiveDependencies": "warn",
+        /* ultracite 7 enables this, but existing code doesn't always specify image dimensions.
+           Disabling to maintain backwards compatibility. Consider enabling and fixing later. */
+        "useImageSize": "off"
+      },
+      "nursery": {
+        "noFloatingPromises": "error",
+        /* ultracite 7 enables useSortedClasses but its "safe" fix incorrectly removes leading spaces
+           from conditional class strings like `${error ? ' error-class' : ''}`. This is a Biome bug.
+           Disabling until the bug is fixed. See https://github.com/biomejs/biome/issues/1274 */
+        "useSortedClasses": "off"
+      },
+      "style": {
+        "useConst": "error",
+        "useTemplate": "error",
+        /* We allow PascalCase and filenames like PlatformAPI.ts */
+        "useFilenamingConvention": {
+          "level": "error",
+          "options": {
+            "requireAscii": true,
+            "filenameCases": ["PascalCase", "kebab-case"],
+            "strictCase": false
+          }
+        },
+        /* Fine to re-export imports in index.ts files */
+        "noExportedImports": "off",
+        /* Can use public modifier for readability */
+        "useConsistentMemberAccessibility": "off",
+        /* Parameter properties are a supported TypeScript feature https://www.typescriptlang.org/docs/handbook/2/classes.html#parameter-properties */
+        "noParameterProperties": "off",
+        /* Enums are allowed */
+        "noEnum": "off",
+        /* ultracite 7 enables this CSS rule that wasn't enabled before.
+           Disabling to maintain backwards compatibility. */
+        "noDescendingSpecificity": "off",
+        /* ultracite 7 enables this, but existing code uses nested ternaries.
+           Disabling to maintain backwards compatibility. Consider enabling and refactoring later. */
+        "noNestedTernary": "off",
+        /* ultracite 7 enables this to prefer interfaces over type aliases.
+           Disabling to maintain backwards compatibility. */
+        "useConsistentTypeDefinitions": "off"
+      },
+      "suspicious": {
+        "noEmptyBlockStatements": "error",
+        "noExplicitAny": "error",
+        /* It's ok to use helper methods to call expect in tests outside of an it block */
+        "noMisplacedAssertion": "off",
+        /* There are some places where await leads to more consistent and readable code, see https://github.com/biomejs/biome/issues/1161 */
+        "useAwait": "off",
+        /* ultracite 7 disables this globally, but we have existing suppressions from ultracite 5.
+           Re-enabling for backwards compatibility. Consider removing to match ultracite 7 defaults. */
+        "noConsole": "warn",
+        /* ultracite 7 enables this at error level, but existing code uses alert() in some places.
+           Disabling to maintain backwards compatibility. Consider enabling and refactoring later. */
+        "noAlert": "off",
+        /* ultracite 7 enables CSS rules that weren't enabled before.
+           Disabling to maintain backwards compatibility. Consider enabling and fixing CSS later. */
+        "noEmptyBlock": "off",
+        "noDuplicateProperties": "off",
+        "noUnknownAtRules": "off",
+        "noShorthandPropertyOverrides": "off",
+        "noDuplicateFontNames": "off"
+      },
+
+      "performance": {
+        "noNamespaceImport": "off",
+        /* Barrel files (index.ts re-exports) are a common pattern in this monorepo */
+        "noBarrelFile": "off",
+        "noAwaitInLoops": "off",
+        /* Re-enabling because we have existing suppressions. This rule is only in ultracite's Next.js preset,
+           not the React preset we use. Consider removing to match ultracite 7 defaults. */
+        "noImgElement": "warn"
+      }
+    }
+  },
+  "overrides": [
+    {
+      /* Test files: ultracite 7 disables noExplicitAny and noConsole here.
+         Re-enabling for backwards compatibility with ultracite 5 suppressions.
+         Consider removing to match ultracite 7 defaults. */
+      "includes": ["**/*.{test,spec}.{ts,tsx,js,jsx}", "**/__tests__/**/*"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "error",
+            "noConsole": "warn"
+          },
+          "complexity": {
+            /* ultracite 7 disables this for tests, but we have existing suppressions.
+               Re-enabling for backwards compatibility. Consider removing to match ultracite 7 defaults. */
+            "noExcessiveCognitiveComplexity": "warn"
+          },
+          "performance": {
+            "useTopLevelRegex": "off"
+          }
+        }
+      }
+    },
+    {
+      /* Scripts: ultracite 7 disables noConsole here.
+         Re-enabling for backwards compatibility with ultracite 5 suppressions.
+         Consider removing to match ultracite 7 defaults. */
+      "includes": ["**/scripts/**/*", "**/bin/**/*"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "warn"
+          },
+          "complexity": {
+            /* ultracite 7 only disables this for tests, but scripts also have suppressions.
+               Re-enabling for backwards compatibility. Consider removing to match ultracite 7 defaults. */
+            "noExcessiveCognitiveComplexity": "warn"
+          }
+        }
+      }
+    },
+    {
+      /* Config files run at build time, not frequently - allow regex patterns */
+      "includes": ["**/*.config.mjs", "**/*.config.cjs", "**/rollup.config.*"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "useTopLevelRegex": "off"
+          }
+        }
+      }
+    },
+    {
+      /* Vitest setup files use camelCase naming convention */
+      "includes": ["**/vitest.*.mjs"],
+      "linter": {
+        "rules": {
+          "style": {
+            "useFilenamingConvention": "off"
+          }
+        }
+      }
+    },
+    {
+      /* platform-component-browser's Storybook manager addon is bundled by
+         Storybook's esbuild with the classic JSX runtime (jsx: "transform"),
+         so these files genuinely import and need `React` in scope. Tell
+         Biome so it doesn't flag the import as unused / type-only. */
+      "includes": ["apps/platform-component-browser/.storybook/**"],
+      "javascript": {
+        "jsxRuntime": "reactClassic"
+      }
+    },
+    {
+      /* The Excel add-in uses office.js's ambient `Office`/`Excel` globals
+         (loaded from the CDN, typed via @types/office-js). Biome doesn't read
+         tsconfig types, so declare them here to avoid noUndeclaredVariables. */
+      "includes": ["apps/corporate-frontend/src/corp-excel/**"],
+      "javascript": {
+        "globals": ["Office", "Excel"]
+      }
+    }
+  ],
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always"
+    }
+  },
+  "css": {
+    "parser": {
+      /* Enable CSS modules parsing for .module.css files */
+      "cssModules": true
+    }
+  }
+}

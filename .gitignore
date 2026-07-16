@@ -1,0 +1,86 @@
+# =====================================================================
+# OS
+# =====================================================================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =====================================================================
+# Editors / IDEs
+# =====================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+# Keep the checked-in reference editor config under typescript_StyleAndRules/
+!typescript_StyleAndRules/.vscode/
+
+# =====================================================================
+# Environment / secrets
+# =====================================================================
+.env
+.env.*
+!.env.example
+
+# =====================================================================
+# Node / frontend (Next.js + TypeScript)
+# =====================================================================
+node_modules/
+.next/
+.next-e2e/
+out/
+build/
+dist/
+.turbo/
+
+# TypeScript build info + generated types
+*.tsbuildinfo
+next-env.d.ts
+
+# Testing (Playwright, coverage)
+test-results/
+playwright-report/
+playwright/.cache/
+coverage/
+
+# =====================================================================
+# Python / backend
+# =====================================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =====================================================================
+# Logs
+# =====================================================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =====================================================================
+# Local dev data (backend)
+# =====================================================================
+# SQLite databases
+*.sqlite3
+*.sqlite
+*.db
+# Mock object storage populated at runtime
+backend/mock_s3_gcs/
+
+# =====================================================================
+# Claude Code
+# =====================================================================
+.claude/settings.local.json

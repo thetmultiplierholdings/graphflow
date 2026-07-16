@@ -1,0 +1,276 @@
+// ============================================================
+// graphflow v7 - engagement-scoped workspaces over an artifact ledger
+// ============================================================
+// Companion document: TDD.md (build plan, authoring guide, run
+// walkthroughs). Supersedes tax_engine_v3_3.dbml, which is historical.
+//
+// CHANGES FROM v6 (each found while writing the TDD)
+//   1. workflow_run_artifacts.source (user | engine). Without it, a
+//      re-run would see its own previously produced intermediates in
+//      the workspace and short-circuit on stale values, and copying a
+//      workspace would copy January results into February as if a user
+//      had supplied them. Rules: only user-sourced attachments feed
+//      resolution; copying copies user-sourced rows only; a user
+//      attach of an engine-attached artifact promotes it to user.
+//   2. workflow_kinds.leaf (CI-derived: consumed by the workflow but
+//      produced by none of its nodes). UI shows leaf kinds on the
+//      attach form by default; intermediate kinds sit behind an
+//      advanced view for deliberate overrides.
+//   3. nodes.output_kind restored (informational): lets CI derive
+//      leaf mechanically and lets the UI label progress and results.
+//   4. workflow_runs.archived_at: hide a workspace without deleting
+//      it, so copied_from provenance chains never break.
+//   5. artifacts.media_type + byte_size: needed to serve downloads;
+//      descriptive only, never hashed.
+//   6. The circular FK pair (artifacts.produced_by_node_run and
+//      node_runs.output_artifact_id) is declared DEFERRABLE INITIALLY
+//      DEFERRED so the completion transaction can insert both rows
+//      atomically. See TDD section 3.5.
+//   7. (adversarial review) Content addressing now includes kind:
+//      UNIQUE (engagement_id, kind, hash). With hash alone, identical
+//      bytes needed under two different kinds silently merged onto the
+//      first kind and resolution misrouted them with no error. Same
+//      bytes + same kind still land on one row, so delete-and-revive
+//      is unchanged.
+//   8. (adversarial review) artifacts.produced_by_node_run now actually
+//      declares its ref (the lineage edge existed only in a note), and
+//      workflow_runs gained idx_workspaces for the engagement landing
+//      screen.
+//
+// MENTAL MODEL
+//   An ENGAGEMENT is the top-level scope. Inside it: ARTIFACTS (every
+//   value ever seen - uploads and computed results, one table) and
+//   WORKFLOW_RUNS (workspaces: a chosen workflow code file plus a flat
+//   set of attached artifacts). January = a workflow_run. February = a
+//   workflow_run copied from January plus two more artifacts.
+//   There are NO inputs or outputs at the workflow level: nodes have
+//   inputs and outputs; a workspace just holds artifacts that were
+//   consumed or produced. Users name, download, and detach them freely.
+//
+// ISOLATION (hard, structural)
+//   Nothing crosses an engagement wall: not memo entries, not
+//   artifacts, not lineage. The memo is UNIQUE (engagement_id,
+//   memo_key); artifacts are UNIQUE (engagement_id, kind, hash). The same
+//   question in two engagements is asked, executed, and stored twice.
+//   Within one engagement the memo IS shared across workflow_runs:
+//   February finding the January OCR review in node_runs is what makes
+//   re-asking a human reviewer structurally impossible.
+//
+// DELETE AND REVIVE
+//   User-facing delete detaches a membership row from the workspace;
+//   the ledger below is never touched. Re-running computes without the
+//   detached artifact. Re-uploading the same bytes later lands on the
+//   SAME artifact row (content addressing), so every node that ever
+//   consumed it - OCR and its human review alike - recomputes the same
+//   memo_key, finds its old node_run, and revives with zero rework.
+//
+// WORKFLOWS ARE CODE
+//   A workflow is a deployed code file; a new version is a new file,
+//   hence a new workflow_id (uk_tax_workflow_v2). CI upserts the
+//   catalog mirror at deploy; deploy order is migrate, publish
+//   catalog, then workers (node_runs FK into nodes requires it).
+//   Users never author graphs.
+//
+// HASHING
+//   artifacts.hash = H(canonical payload bytes)
+//   code_hash      = H(decorator metadata + node source + hash_with
+//                    dependencies (helper functions by source, constants
+//                    by canonical value) + salt), per node, computed by
+//                    CI and baked into the worker
+//   input_hash     = H(canonical argument map; artifact arguments by
+//                    content hash; artifact lists sorted by hash)
+//   memo_key       = H(code_hash || input_hash)
+//   Memo lookups always pair engagement_id with memo_key. Canonical
+//   serialization: sorted keys, normalized numbers and dates, nothing
+//   volatile inside hashed payloads. Labels are never hashed.
+//
+// EVALUATION
+//   Run on workflow_run W:
+//     StartWorkflow(
+//       workflow_id   = 'wfrun-' + W,          // duplicate starts collapse
+//       workflow_type = workflows.temporal_workflow_type,
+//       task_queue    = workflows.task_queue,
+//       args          = snapshot of the USER-sourced attachments of W)
+//   The code walks its own DAG (wiring lives in code, not here). A node
+//   needing kind K takes the user-attached artifacts of kind K - so a
+//   user-attached artifact of an intermediate kind can short-circuit
+//   the subgraph that would have computed it, as an authored pattern.
+//   Per node: look up (engagement_id, memo_key); hit = reuse; miss =
+//   execute (engine activity, or a human-task workflow with temporal id
+//   'node-{engagement_id}-{memo_key}' so duplicate human asks collapse;
+//   its first step re-checks the memo and self-completes if the answer
+//   already exists, so no reviewer ever sees an answered question),
+//   then ONE idempotent completion transaction inserts artifact +
+//   node_run + node_run_inputs and attaches the output to W with
+//   source = engine and an auto-generated label. Watch-it-run reads
+//   Temporal; only completed facts land here.
+//
+// FACTS VS WORKSPACE
+//   LEDGER (insert-only): artifacts, node_runs, node_run_inputs. The
+//   single mutability carve-out is artifacts.label (display rename).
+//   WORKSPACE (editable intent): workflow_runs and their membership
+//   rows - attach, detach, relabel, repoint at a v2 file, re-run,
+//   archive. Nothing the workspace does can erase a ledger fact, which
+//   is why every number ever produced stays explainable forever.
+// ============================================================
+
+Project graphflow {
+  database_type: 'PostgreSQL'
+  Note: '''
+    Memo sharing between engagements is deliberately impossible; the
+    price is reference-data computations re-running once per engagement,
+    the payoff is each engagement being a self-contained auditable
+    universe. Within an engagement, memo sharing across workflow_runs is
+    deliberately guaranteed.
+  '''
+}
+
+Enum executor_type {
+  engine
+  human
+}
+
+Enum attachment_source {
+  user   [note: 'attached by a person: upload, explicit attach, reintroduction, copy. Only these feed kind resolution when a run starts']
+  engine [note: 'attached by the engine as a run consumed or produced it. Results to browse and download, never fed back into resolution']
+}
+
+// ============ SCOPE ============
+
+Table engagements {
+  engagement_id bigint [pk, increment]
+  label varchar [not null]
+  created_at timestamptz [not null]
+
+  Note: 'Top-level scope; everything below belongs to exactly one. May simply mirror an id owned by a case-management system elsewhere - this table exists so scoping edges are visible in the diagram.'
+}
+
+// ============ CATALOG (CI-published mirror of code) ============
+
+Table workflows {
+  workflow_id varchar [pk, note: 'filename convention IS the versioning: uk_tax_workflow, uk_tax_workflow_v2 - a new version is a new row']
+  display_name varchar [not null]
+  temporal_workflow_type varchar [not null]
+  task_queue varchar [not null]
+
+  Note: 'One row per deployed workflow code file, upserted by CI, never user-created, never deleted (old workflow_runs reference them forever).'
+}
+
+Table workflow_kinds {
+  workflow_id varchar [not null, ref: > workflows.workflow_id]
+  kind varchar [not null, note: 'scoped to this workflow: the same string under another workflow is unrelated']
+  leaf boolean [not null, default: true, note: 'CI-derived: consumed by this workflow but produced by none of its nodes. Leaf kinds appear on the default attach form; non-leaf kinds are attachable only via an advanced view (deliberate overrides)']
+  display_name varchar
+
+  indexes {
+    (workflow_id, kind) [pk]
+  }
+
+  Note: 'The kind vocabulary this workflow code resolves from a workspace - what the UI offers when a user attaches data. How many artifacts of a kind a run accepts, and what each kind means, is owned by the code.'
+}
+
+Table nodes {
+  workflow_id varchar [not null, ref: > workflows.workflow_id]
+  node_id varchar [not null]
+  executor executor_type [not null, note: 'human steps stay one-line queryable for compliance']
+  output_kind varchar [not null, note: 'informational: the kind this node produces. Lets CI derive workflow_kinds.leaf and lets the UI label progress; the engine never reads it']
+  display_name varchar
+  code_hash varchar(64) [not null, note: 'fingerprint of THIS node implementation at current deploy: decorator metadata + function source + declared hash_with dependencies (helper functions by source, constants such as schemas by canonical value) + salt. Per node, not per file, so nodes copy-pasted unchanged into a v2 file keep their memo hits']
+
+  indexes {
+    (workflow_id, node_id) [pk]
+  }
+
+  Note: 'Informational mirror for step lists and progress display. The engine reads no wiring from the database - the code is the DAG.'
+}
+
+// ============ LEDGER (insert-only) ============
+
+Table artifacts {
+  artifact_id bigint [pk, increment]
+  engagement_id bigint [not null, ref: > engagements.engagement_id]
+  hash varchar(64) [not null, note: 'content address: H(canonical payload bytes)']
+  kind varchar [not null, note: 'open vocabulary owned by workflow code; how a node finds this artifact among the attachments of a run']
+  label varchar [note: 'THE ONE MUTABLE LEDGER COLUMN: engine assigns a friendly default at creation (uk_estimate_160726_143512), users rename at will. Display only, never part of any hash']
+  media_type varchar [not null, note: 'application/pdf, application/json, ... - needed to serve downloads; descriptive only']
+  byte_size bigint [not null, note: 'payload size for listings and storage accounting; descriptive only']
+  payload_ref varchar [note: 'pointer to the bytes in object storage; true byte destruction (regulatory) is a storage scrub, never a row deletion']
+  produced_by_node_run bigint [ref: > node_runs.node_run_id, note: 'the node_run that produced these bytes; NULL = supplied from outside (upload, reference table, hand-built value). This one nullable column is the entire consumed-vs-produced distinction the workspace needs. FK is DEFERRABLE INITIALLY DEFERRED - see TDD 3.5']
+  created_by varchar [not null, note: 'uploader, or the reviewer who answered a human task, or engine']
+  created_at timestamptz [not null]
+
+  indexes {
+    (engagement_id, kind, hash) [unique, note: 'content addressing WITHIN an engagement, per kind: re-supplying identical bytes under the same kind lands on the existing row - the mechanism behind delete-and-revive. Identical bytes under a DIFFERENT kind are a different row, because kinds route resolution and merging across kinds would misroute silently. A separate row in another engagement: no sharing']
+    (engagement_id, kind, created_at) [name: 'idx_browse', note: 'browse an engagement by kind; suggest attachments when composing a workflow_run']
+  }
+
+  Note: 'Every value the system has seen, uploads and computed results alike. Rows are never deleted and, except label, never updated.'
+}
+
+Table node_runs {
+  node_run_id bigint [pk, increment, note: 'monotonic; execution timestamps live in Temporal']
+  engagement_id bigint [not null, ref: > engagements.engagement_id]
+  workflow_id varchar [not null, note: 'descriptive provenance: where this node lives; NOT part of the memo key']
+  node_id varchar [not null]
+  code_hash varchar(64) [not null, note: 'the implementation fingerprint that actually ran']
+  memo_key varchar(64) [not null, note: 'H(code_hash || input_hash) - no version labels, no workflow_run scope: answers are shared across workspaces within the engagement']
+  output_artifact_id bigint [not null, ref: > artifacts.artifact_id, note: 'one run, one artifact. FK is DEFERRABLE INITIALLY DEFERRED - see TDD 3.5']
+  temporal_id varchar [not null, note: 'format {workflowId}/{runId}/{activityId} for engine nodes, {workflowId}/{runId} for human tasks - run id included because wfrun ids are reused across re-runs. Executor identity, timing, retries, argument bindings live under this ticket; retention must exceed the audit horizon']
+
+  indexes {
+    (engagement_id, memo_key) [unique, note: 'THE MEMO, hard-scoped: February finding the January OCR review here is what makes re-asking a human impossible; another engagement asking the same question gets its own row']
+    output_artifact_id [name: 'idx_reverse_lineage']
+  }
+
+  Note: 'One row per COMPLETED node execution, inserted only inside the idempotent completion transaction. Human answers are ordinary rows.'
+}
+
+Table node_run_inputs {
+  node_run_id bigint [not null, ref: > node_runs.node_run_id]
+  artifact_id bigint [not null, ref: > artifacts.artifact_id]
+
+  indexes {
+    (node_run_id, artifact_id) [pk]
+    artifact_id [name: 'idx_consumer', note: 'who ever read this value - impact analysis and audit walks. This, not workspace membership, is the immutable record of what an execution actually used']
+  }
+
+  Note: 'Recorded actuals: the artifacts each node_run actually read.'
+}
+
+// ============ WORKSPACE (editable intent) ============
+
+Table workflow_runs {
+  workflow_run_id bigint [pk, increment]
+  engagement_id bigint [not null, ref: > engagements.engagement_id]
+  workflow_id varchar [not null, ref: > workflows.workflow_id, note: 'which code file this workspace executes; repoint at the v2 file to regenerate under fixed code']
+  label varchar [not null, note: 'January 2026 estimate - a display name, not a modeled period']
+  copied_from_workflow_run bigint [ref: > workflow_runs.workflow_run_id, note: 'provenance: February was seeded from January. Copying = new row + copies of the USER-sourced membership rows only; engine results are never copied (the new run recomputes or memo-hits them). Payloads are never duplicated']
+  archived_at timestamptz [note: 'soft hide: workspaces are never deleted, so copied_from chains stay intact']
+  created_by varchar [not null]
+  created_at timestamptz [not null]
+
+  indexes {
+    (engagement_id, created_at) [name: 'idx_workspaces', note: 'the engagement landing screen: list workspaces newest-first; queries filter archived_at IS NULL']
+  }
+
+  Note: 'The workspace: a chosen workflow plus a flat set of attached artifacts. Running it turns current user attachments into ledger facts. All in-flight state lives in Temporal under wfrun-{workflow_run_id}.'
+}
+
+Table workflow_run_artifacts {
+  workflow_run_id bigint [not null, ref: > workflow_runs.workflow_run_id]
+  artifact_id bigint [not null, ref: > artifacts.artifact_id]
+  source attachment_source [not null, note: 'user rows feed kind resolution at run start; engine rows are results on display. A user attaching an artifact the engine already attached PROMOTES the row to user; engine attaches never demote']
+  added_by varchar [not null]
+  added_at timestamptz [not null]
+
+  indexes {
+    (workflow_run_id, artifact_id) [pk]
+    artifact_id [name: 'idx_impact', note: 'this statement was wrong - which workspaces hold it? one query']
+  }
+
+  Note: 'Plain membership, no input/output roles: consumed-vs-produced is read off produced_by_node_run on the artifact; source records who attached it here. Detaching a row is the user-facing delete - the ONLY delete in the system. The ledger keeps everything, which is exactly why reintroducing the same bytes revives all prior work (OCR and its human review included) with zero rework. Note: a detached engine attachment reappears on the next run if the evaluation touches that artifact again.'
+}
+
+// Descriptive provenance from ledger into the catalog mirror.
+// Deploy order requirement: catalog rows must exist before workers run.
+Ref: node_runs.(workflow_id, node_id) > nodes.(workflow_id, node_id)

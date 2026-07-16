@@ -1,0 +1,2 @@
+# Biome is stricter and faster than ESLint; --staged scopes to files about to be committed.
+yarn lint:biome:staged

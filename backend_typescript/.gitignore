@@ -1,0 +1,9 @@
+node_modules/
+out-tsc/
+coverage/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+mock_s3_gcs/
+mock_s3_gcs_e2e/
+.env

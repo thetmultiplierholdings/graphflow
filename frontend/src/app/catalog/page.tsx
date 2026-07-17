@@ -98,7 +98,7 @@ function WorkflowCard({
             {workflow.displayName}
           </CardTitle>
           <span className="font-code text-xs text-muted-foreground">
-            {workflow.workflowId}.py
+            {workflow.workflowId}.ts
           </span>
           <span className="font-code text-xs text-muted-foreground">
             queue: {workflow.taskQueue}

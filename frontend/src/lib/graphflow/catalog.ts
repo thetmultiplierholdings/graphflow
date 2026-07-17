@@ -1,5 +1,5 @@
 // The workflow catalog — a THIN mirror of GET /catalog. The real catalog
-// lives in the backend (workflows/*.py published to the ledger's mirror
+// lives in the backend (workflows/*.ts published to the ledger's mirror
 // tables); this module only defines the shapes and non-reactive helpers.
 // Components that must re-render when the catalog loads should subscribe to
 // useCatalogStore directly.

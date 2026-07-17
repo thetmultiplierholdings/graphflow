@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "backend",
-      "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "--directory", "backend", "uvicorn", "api.main:app", "--port", "8000"],
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "backend_typescript", "run", "dev"],
       "port": 8000
     },
     {

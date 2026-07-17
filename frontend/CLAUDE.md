@@ -5,9 +5,10 @@ professional-service firms. Firms open
 engagements; inside an engagement they create workspaces, attach documents,
 press Run, watch it execute, and download the results.
 
-The frontend is a PURE RENDERING LAYER over the FastAPI service in `../backend/api`.
-The responsibility split: ALL invariants live in the Python SDK and its SQLite
-ledger; the API is a thin translation layer; the UI only renders and calls.
+The frontend is a PURE RENDERING LAYER over the Fastify service in
+`../backend_typescript/src/api`. The responsibility split: ALL invariants live
+in the TypeScript engine and its SQLite ledger; the API is a thin translation
+layer; the UI only renders and calls.
 
 ## Graphflow Domain (do not casually re-model)
 
@@ -91,14 +92,14 @@ nodes (with codeHash), kinds (leaf = attachable document).
 
 ### Seed / reset is backend-only
 
-Demo data is seeded by the backend: `uv run python cli.py seed --fresh` in
-the `../backend` directory. There is no client-side seed and no localStorage — reloading
-the app re-fetches everything from the API.
+Demo data is seeded by the backend: `npm run seed -- --fresh` in the
+`../backend_typescript` directory. There is no client-side seed and no
+localStorage — reloading the app re-fetches everything from the API.
 
 ### Rules
 
 - The frontend must NEVER compute content hashes, memo keys, or canonical
-  JSON — those belong to the Python SDK
+  JSON — those belong to the backend engine
 - NEVER execute node bodies client-side
 - NEVER write or fabricate ledger rows; never invent data the API owns
 - Client-side form validation is UX only — the backend enforces the same

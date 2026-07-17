@@ -1,0 +1,27 @@
+================================================================
+ COMBINED TAX REPORT (graphflow demo)
+================================================================
+
+--- PAGE 1: CHARLES SCHWAB BROKERAGE STATEMENT - FEB 2026 ---
+CHARLES SCHWAB BROKERAGE STATEMENT - FEB 2026
+ACCOUNT SW-30419
+--- TRANSACTIONS ---
+2026-02-06 | DIVIDEND VOO | 154.75
+2026-02-20 | DIVIDEND SCHD | 98.40
+
+--- PAGE 2: PAYMENT SLIP - FEBRUARY 2026 ---
+PAYMENT SLIP - FEBRUARY 2026
+EMPLOYER: BLUE HARBOUR LLP
+--- PAYMENTS ---
+2026-02-27 | NET SALARY | 6100.00
+2026-02-27 | CAR ALLOWANCE | 350.00
+
+--- FINAL PAGE: SUMMATION (4 transactions) ---
+  2026-02-06  DIVIDEND VOO                       154.75
+  2026-02-20  DIVIDEND SCHD                       98.40
+  2026-02-27  CAR ALLOWANCE                      375.00
+  2026-02-27  NET SALARY                        6100.00
+  ------------------------------------------------------
+  TOTAL                                         6728.15
+  TAX RATE                                         0.24
+  TAX DUE (total * 24%)                         1614.76

@@ -1,0 +1,18 @@
+================================================================
+ COMBINED TAX REPORT (graphflow demo)
+================================================================
+
+--- PAGE 1: PAYMENT SLIP - MAY 2026 ---
+PAYMENT SLIP - MAY 2026
+EMPLOYER: TEST CORP
+--- TRANSACTIONS ---
+2026-05-28 | NET SALARY | 5000.00
+2026-05-28 | BONUS | 1000.00
+
+--- FINAL PAGE: SUMMATION (2 transactions) ---
+  2026-05-28  BONUS                             1000.00
+  2026-05-28  NET SALARY                        5000.00
+  ------------------------------------------------------
+  TOTAL                                         6000.00
+  TAX RATE                                         0.24
+  TAX DUE (total * 24%)                         1440.00

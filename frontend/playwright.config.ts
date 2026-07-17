@@ -1,9 +1,10 @@
-// Playwright e2e against the REAL stack: FastAPI + SQLite + Temporal Cloud
-// behind a test-dedicated API on :8100, and a test-dedicated Next dev server
-// on :3100. The live dev stack (:3000 / :8000 / graphflow.sqlite3) is never
-// touched — the e2e run gets its own scratch db (graphflow_e2e.sqlite3) and
-// payload store (mock_s3_gcs_e2e); leftovers are cleared below before the
-// servers boot, and the spec's afterAll deletes them again at the end.
+// Playwright e2e against the REAL stack: Fastify (TypeScript) + SQLite +
+// Temporal Cloud behind a test-dedicated API on :8100, and a test-dedicated
+// Next dev server on :3100. The live dev stack (:3000 / :8000 /
+// graphflow.sqlite3) is never touched — the e2e run gets its own scratch db
+// (graphflow_e2e.sqlite3) and payload store (mock_s3_gcs_e2e); leftovers are
+// cleared below before the servers boot, and the spec's afterAll deletes
+// them again at the end.
 
 import path from "path"
 import { defineConfig, devices } from "@playwright/test"
@@ -13,9 +14,9 @@ import {
   terminateScratchTemporalWorkflows,
 } from "./e2e/scratch-cleanup"
 
-// The Python backend now lives in ../backend (sibling of this frontend).
-// uv, the FastAPI app, and .env all resolve from there.
-const BACKEND_ROOT = path.resolve(__dirname, "..", "backend")
+// The TypeScript backend lives in ../backend_typescript (sibling of this
+// frontend). tsx, the Fastify app, and .env all resolve from there.
+const BACKEND_ROOT = path.resolve(__dirname, "..", "backend_typescript")
 
 // Pre-run cleanup MUST happen here, not in globalSetup: Playwright starts
 // the webServer plugins BEFORE globalSetup, and the API creates the scratch
@@ -64,14 +65,15 @@ export default defineConfig({
   webServer: [
     {
       // Test-dedicated API over a scratch db + storage. The embedded
-      // Temporal worker connects with the .env credentials loaded by
-      // engine.runtime; GRAPHFLOW_CORS_ORIGINS admits the :3100 frontend.
-      command: `uv run uvicorn api.main:app --port ${API_PORT}`,
+      // Temporal worker connects with the .env credentials loaded by the
+      // backend's Env loader; GRAPHFLOW_CORS_ORIGINS admits the :3100 frontend.
+      command: "npx tsx src/index.ts",
       cwd: BACKEND_ROOT,
       url: `http://localhost:${API_PORT}/catalog`,
       reuseExistingServer: false,
       timeout: 180_000,
       env: {
+        PORT: String(API_PORT),
         GRAPHFLOW_DB: E2E_DB,
         GRAPHFLOW_STORAGE: E2E_STORAGE,
         GRAPHFLOW_EMBED_WORKER: "1",

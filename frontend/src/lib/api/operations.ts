@@ -1,6 +1,6 @@
 // The engine-facing operations pages call — the replacement for the old
 // client-side engine simulation. Execution now happens in the real backend
-// (FastAPI -> Temporal); this module starts runs, mirrors their progress
+// (API -> Temporal); this module starts runs, mirrors their progress
 // stream into the run store, and submits reviewer answers.
 
 import * as api from "@/lib/api/client"

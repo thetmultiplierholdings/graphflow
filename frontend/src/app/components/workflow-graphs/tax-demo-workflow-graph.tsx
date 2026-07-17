@@ -1,7 +1,7 @@
 import { useId, type ReactNode } from "react"
 
 /**
- * Hand-crafted static SVG of the tax_demo_workflow DAG (workflows/tax_demo_workflow.py).
+ * Hand-crafted static SVG of the tax_demo_workflow DAG (workflows/tax_demo_workflow.ts).
  *
  *   documents ×N ─▶ OCR (engine) ─▶ Verify OCR extraction (HUMAN, memoised)
  *   ── all chains fan in ─▶ Append to master list (FOLD) ─▶ Calculator ─▶ Combined report

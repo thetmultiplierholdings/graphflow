@@ -1,4 +1,4 @@
-// Typed fetch wrapper over the Graphflow FastAPI service. This is the ONE place
+// Typed fetch wrapper over the Graphflow API service. This is the ONE place
 // where backend conventions (integer ids, snake_case) are converted into the
 // app's conventions (string ids, camelCase schema types) — and back on the
 // way out. Nothing past this module should ever see a snake_case key.

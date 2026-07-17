@@ -1,5 +1,5 @@
-// The full graphflow story, in a real browser against the real stack: FastAPI
-// over SQLite + Temporal Cloud (embedded worker), starting from an EMPTY
+// The full graphflow story, in a real browser against the real stack: the
+// Fastify API over SQLite + Temporal Cloud (embedded worker), starting from an EMPTY
 // database (the config clears leftover scratch state before the servers boot).
 //
 // Serial by design: each step continues the previous one's server state
@@ -181,9 +181,14 @@ test.describe("full graphflow story", () => {
 
   test("8. catalog shows both workflow versions with badges", async ({ page }) => {
     await page.goto("/catalog")
-    await expect(page.getByText("Tax demo workflow", { exact: true })).toBeVisible()
+    // The catalogue shows one version at a time behind a selector; the current
+    // (non-superseded) version is selected by default.
     await expect(page.getByText("Tax demo workflow v2", { exact: true })).toBeVisible()
     await expect(page.getByText("Current version")).toBeVisible()
+    // Switch to the superseded original and check its badge.
+    await page.getByLabel("Select a workflow").click()
+    await page.getByRole("option", { name: "Tax demo workflow (superseded)" }).click()
+    await expect(page.getByText("Tax demo workflow", { exact: true })).toBeVisible()
     await expect(page.getByText(/Superseded by tax_demo_workflow_v2/)).toBeVisible()
   })
 })

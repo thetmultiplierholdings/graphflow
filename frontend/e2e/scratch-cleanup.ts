@@ -11,9 +11,9 @@ import { execFileSync } from "child_process"
 import fs from "fs"
 import path from "path"
 
-// The TypeScript backend lives in <repo>/backend_typescript — the API's cwd,
+// The TypeScript backend lives in <repo>/backend — the API's cwd,
 // so it creates the scratch db + payload store there, and .env resolves there.
-const BACKEND_ROOT = path.resolve(__dirname, "..", "..", "backend_typescript")
+const BACKEND_ROOT = path.resolve(__dirname, "..", "..", "backend")
 // The cleanup script ships with the backend (it imports the backend's modules).
 const CLEANUP_SCRIPT = path.join(BACKEND_ROOT, "scripts", "cleanup-temporal.ts")
 const E2E_DB = "graphflow_e2e.sqlite3"

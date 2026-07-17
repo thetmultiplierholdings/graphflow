@@ -18,13 +18,13 @@ execution + workflows baked in code.**
 
 ## Setup
 
-The TypeScript backend lives in `backend_typescript/` (Node 22+, npm); the
+The TypeScript backend lives in `backend/` (Node 22+, npm); the
 Next.js frontend in `frontend/` (Node + npm). Credentials live in
-`backend_typescript/.env` (`TEMPORAL_ADDRESS`,
+`backend/.env` (`TEMPORAL_ADDRESS`,
 `TEMPORAL_NAMESPACE`, `TEMPORAL_API_KEY`, `TEMPORAL_TASK_QUEUE`). Then:
 
 ```
-cd backend_typescript
+cd backend
 npm install
 npm run check          # typecheck + tests + lint + code-hash freshness
 npm run cli -- demo    # full end-to-end story against real Temporal
@@ -42,7 +42,7 @@ the Temporal worker by default and is the only process that talks to
 Temporal (the browser never sees credentials):
 
 ```
-cd backend_typescript
+cd backend
 npm run seed -- --fresh    # optional: seed the demo dataset
 npm run dev                # the API on :8000 (+ embedded worker)
 
@@ -71,7 +71,7 @@ embedded worker. `--fresh` first terminates the old instance's open Temporal
 runs, then deletes the db (+ `-wal`/`-shm`) and the payload store
 (`mock_s3_gcs/`), re-creates the schema, and reseeds.
 
-## The mock bucket (`backend_typescript/mock_s3_gcs/`)
+## The mock bucket (`backend/mock_s3_gcs/`)
 
 `mock_s3_gcs/` is a local directory standing in for an S3/GCS bucket
 (`src/infrastructure/storage/Storage.ts`; path overridable via `GRAPHFLOW_STORAGE`). It is the
@@ -93,7 +93,7 @@ references live in durable Temporal state until the run completes, so
   dangling — ledger rows whose payloads 404, or orphaned bytes. The sqlite
   file and the bucket are one database; always reset them as a pair.
 
-To run CLI pieces separately (all from `backend_typescript/`):
+To run CLI pieces separately (all from `backend/`):
 
 ```
 npm run cli -- init        # create db + publish catalog
@@ -106,7 +106,7 @@ npm run cli -- download <artifact_id> out.txt
 
 ## Testing
 
-Backend (from `backend_typescript/`):
+Backend (from `backend/`):
 
 ```
 npm run test
@@ -123,7 +123,7 @@ npm run test
   dev stack.
 
 Frontend e2e (from `frontend/`, needs real Temporal credentials in
-`backend_typescript/.env`):
+`backend/.env`):
 
 ```
 npm run test:e2e
@@ -137,7 +137,7 @@ live dev stack on :8000/:3000 is up. See `frontend/playwright.config.ts`.
 ## Layout
 
 ```
-backend_typescript/      the TypeScript backend (run npm from here)
+backend/      the TypeScript backend (run npm from here)
   src/domain/            pure, bundle-safe engine core (no node:*, no framework)
     canonical/           canonical JSON + hashing — the memoization contract
     registry/            defineNode / defineHumanNode / defineWorkflow + buildRegistry
@@ -169,7 +169,7 @@ frontend/                Next.js 16 UI (talks to the API over HTTP only)
   Same story for the backend: `node_modules/` is machine-specific — delete it
   and `npm install` (native modules like better-sqlite3 rebuild).
 - **Runs hang at "running" forever**: check the Temporal credentials in
-  `backend_typescript/.env` and that exactly one worker is polling your
+  `backend/.env` and that exactly one worker is polling your
   `TEMPORAL_TASK_QUEUE` (the API embeds one by default).
 - **Stale state after experiments**: `npm run seed -- --fresh`
   resets db + payload store and terminates the old instance's open runs.

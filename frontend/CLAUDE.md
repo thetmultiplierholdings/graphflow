@@ -6,7 +6,7 @@ engagements; inside an engagement they create workspaces, attach documents,
 press Run, watch it execute, and download the results.
 
 The frontend is a PURE RENDERING LAYER over the Fastify service in
-`../backend_typescript/src/api`. The responsibility split: ALL invariants live
+`../backend/src/api`. The responsibility split: ALL invariants live
 in the TypeScript engine and its SQLite ledger; the API is a thin translation
 layer; the UI only renders and calls.
 
@@ -93,7 +93,7 @@ nodes (with codeHash), kinds (leaf = attachable document).
 ### Seed / reset is backend-only
 
 Demo data is seeded by the backend: `npm run seed -- --fresh` in the
-`../backend_typescript` directory. There is no client-side seed and no
+`../backend` directory. There is no client-side seed and no
 localStorage — reloading the app re-fetches everything from the API.
 
 ### Rules

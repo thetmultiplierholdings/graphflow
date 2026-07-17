@@ -14,9 +14,9 @@ import {
   terminateScratchTemporalWorkflows,
 } from "./e2e/scratch-cleanup"
 
-// The TypeScript backend lives in ../backend_typescript (sibling of this
+// The TypeScript backend lives in ../backend (sibling of this
 // frontend). tsx, the Fastify app, and .env all resolve from there.
-const BACKEND_ROOT = path.resolve(__dirname, "..", "backend_typescript")
+const BACKEND_ROOT = path.resolve(__dirname, "..", "backend")
 
 // Pre-run cleanup MUST happen here, not in globalSetup: Playwright starts
 // the webServer plugins BEFORE globalSetup, and the API creates the scratch

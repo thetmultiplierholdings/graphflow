@@ -1,9 +1,0 @@
-{
-  "$schema": "https://unpkg.com/knip@5/schema.json",
-  "entry": [
-    "src/temporal/Workflows.ts",
-    "src/shared/errors/Errors.ts",
-    "src/**/*.test.ts"
-  ],
-  "ignoreExportsUsedInFile": true
-}

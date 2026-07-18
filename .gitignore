@@ -54,7 +54,8 @@ __pycache__/
 .eggs/
 .venv/
 venv/
-env/
+# Anchored to repo root: backend/src/infrastructure/env/ is source code
+/env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

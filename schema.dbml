@@ -1,0 +1,172 @@
+// graphflow SQLite schema, transcribed as-is from the SCHEMA constant in
+// backend/src/infrastructure/db/Db.ts (the source of truth — keep in sync by hand).
+//
+// Conventions preserved from the live database:
+//   - SQLite type affinities kept verbatim (integer / text); timestamps are ISO-8601 TEXT.
+//   - executor / source are TEXT columns with CHECK constraints in SQLite; modeled as enums here.
+//   - LEDGER tables (artifacts, node_runs, node_run_inputs) are insert-only; the single mutable
+//     ledger column is artifacts.label. WORKSPACE rows are editable; deleting a
+//     workflow_run_artifacts row (detach) is the only DELETE in the system.
+//   - The circular FK pair artifacts.produced_by_node_run <-> node_runs.output_artifact_id is
+//     DEFERRABLE INITIALLY DEFERRED, enforced because every connection sets PRAGMA foreign_keys=ON.
+// Renders on dbdiagram.io.
+
+Project graphflow {
+  database_type: 'SQLite'
+  Note: 'Content-addressed computation ledger + editable workspaces + CI-published catalog mirror. Ported from Postgres; SQLite is single-writer, transactions use BEGIN IMMEDIATE.'
+}
+
+// TEXT CHECK (executor IN (engine, human)) in SQLite
+enum node_executor {
+  engine
+  human
+}
+
+// TEXT CHECK (source IN (user, engine)) in SQLite
+enum attachment_source {
+  user
+  engine
+}
+
+Table meta {
+  key text [pk]
+  value text [not null]
+  Note: 'Key/value store, e.g. the instance id.'
+}
+
+Table engagements {
+  engagement_id integer [pk]
+  label text [not null]
+  created_at text [not null]
+  Note: 'Isolation and identity scope: artifact identity and memo lookups are engagement-scoped. Load-bearing for dedup/confidentiality, unlike workspaces.'
+}
+
+// ---------- CATALOG (CI-published mirror of the in-binary registry; upsert only, never deleted) ----------
+
+Table workflows {
+  workflow_id text [pk]
+  display_name text [not null]
+  temporal_workflow_type text [not null]
+  task_queue text [not null, note: 'dispatch fleet; old workspaces keep their referent']
+  Note: 'Catalog row per authored workflow. Dispatch metadata only — the DAG itself is code.'
+}
+
+Table workflow_kinds {
+  workflow_id text [not null, ref: > workflows.workflow_id]
+  kind text [not null]
+  leaf integer [not null, default: 1, note: '0/1 flag']
+  display_name text
+  indexes {
+    (workflow_id, kind) [pk]
+  }
+  Note: 'Artifact kinds a workflow declares.'
+}
+
+Table nodes {
+  workflow_id text [not null, ref: > workflows.workflow_id]
+  node_id text [not null]
+  executor node_executor [not null]
+  output_kind text [not null]
+  display_name text
+  code_hash text [not null, note: 'build-time hash of authored source incl. declared deps']
+  indexes {
+    (workflow_id, node_id) [pk]
+  }
+  Note: 'Catalog mirror and FK anchor for node_runs. Not routing config: implementations are compiled into the worker binary and resolved by node_id from the activity payload.'
+}
+
+// ---------- LEDGER (insert-only facts) ----------
+
+Table artifacts {
+  artifact_id integer [pk]
+  engagement_id integer [not null, ref: > engagements.engagement_id]
+  hash text [not null, note: 'sha256 hex of payload bytes — content identity, no provenance']
+  kind text [not null]
+  label text [note: 'the ONLY mutable ledger column']
+  media_type text [not null]
+  byte_size integer [not null]
+  payload_ref text [note: 'content-addressed, write-once payload location']
+  produced_by_node_run integer [ref: > node_runs.node_run_id, note: 'NULL = entered from outside (user upload); deferred FK, circular with node_runs.output_artifact_id']
+  created_by text [not null]
+  created_at text [not null]
+  indexes {
+    (engagement_id, kind, hash) [unique]
+    (engagement_id, kind, created_at) [name: 'idx_browse']
+  }
+  Note: 'Values. Identity = (engagement_id, kind, hash); same bytes converge to one row, so different questions can share one answer and re-uploads revive prior work.'
+}
+
+Table node_runs {
+  node_run_id integer [pk, note: 'pre-allocated MAX+1 inside BEGIN IMMEDIATE']
+  engagement_id integer [not null, ref: > engagements.engagement_id]
+  workflow_id text [not null]
+  node_id text [not null]
+  code_hash text [not null, note: 'hash of the code that actually EXECUTED (activity side)']
+  memo_key text [not null, note: 'sha256(code_hash || sha256(canonical args)); artifact args appear as content hashes — minted workflow-side']
+  output_artifact_id integer [not null, ref: > artifacts.artifact_id, note: 'deferred FK, circular with artifacts.produced_by_node_run']
+  temporal_id text [not null, note: 'engine rows: workflowId/runId/activityId; human rows: workflowId/runId with no activityId']
+  indexes {
+    (engagement_id, memo_key) [unique]
+    output_artifact_id [name: 'idx_reverse_lineage']
+  }
+  Note: 'The memo / constructive-trace store: one row per DISTINCT computation (question -> answer), not per execution. Memo hits insert nothing HERE (they still add a workspace membership row); run-button presses are not recorded anywhere in the DB.'
+}
+
+Ref: node_runs.(workflow_id, node_id) > nodes.(workflow_id, node_id)
+
+Table node_run_inputs {
+  node_run_id integer [not null, ref: > node_runs.node_run_id]
+  artifact_id integer [not null, ref: > artifacts.artifact_id]
+  indexes {
+    (node_run_id, artifact_id) [pk]
+    artifact_id [name: 'idx_consumer']
+  }
+  Note: 'Provenance edges: which artifacts each computation consumed. History recorded as rows, deliberately excluded from identity (no Merkle recursion).'
+}
+
+// ---------- WORKSPACE (editable business layer; called "workspace" throughout the code) ----------
+
+Table workflow_runs {
+  workflow_run_id integer [pk]
+  engagement_id integer [not null, ref: > engagements.engagement_id]
+  workflow_id text [not null, ref: > workflows.workflow_id]
+  label text [not null]
+  copied_from_workflow_run integer [ref: > workflow_runs.workflow_run_id, note: 'copy provenance; a copy carries only user-sourced attachments']
+  archived_at text
+  created_by text [not null]
+  created_at text [not null]
+  indexes {
+    (engagement_id, created_at) [name: 'idx_workspaces']
+  }
+  Note: 'A workspace (named input set + results pinboard), NOT an execution record. Also the run mutex scope: the Temporal workflow id is derived from workflow_run_id.'
+}
+
+Table workflow_run_artifacts {
+  workflow_run_id integer [not null, ref: > workflow_runs.workflow_run_id]
+  artifact_id integer [not null, ref: > artifacts.artifact_id]
+  source attachment_source [not null, note: 'user = run input (part of the snapshot); engine = result pinned by a run']
+  added_by text [not null]
+  added_at text [not null]
+  indexes {
+    (workflow_run_id, artifact_id) [pk]
+    artifact_id [name: 'idx_impact']
+  }
+  Note: 'Workspace membership. User attach PROMOTES an engine row to user; engine attach never demotes (ON CONFLICT DO NOTHING). Detach (DELETE) here is the only DELETE in the system — it removes membership, never the artifact.'
+}
+
+TableGroup catalog {
+  workflows
+  workflow_kinds
+  nodes
+}
+
+TableGroup ledger {
+  artifacts
+  node_runs
+  node_run_inputs
+}
+
+TableGroup workspace {
+  workflow_runs
+  workflow_run_artifacts
+}

@@ -52,8 +52,8 @@ export function registerCatalogRoutes(app: FastifyInstance, deps: ApiDeps): void
         created_at: wf.created_at,
         updated_at: wf.updated_at,
         superseded_by: superseded[wf.workflow_id] ?? null,
-        kinds: wf.kinds.map((k) => ({
-          kind: k.kind,
+        nodeparamslots: wf.nodeparamslots.map((k) => ({
+          nodeparamslot: k.nodeparamslot,
           display_name: k.display_name,
           source: k.source,
           leaf: k.leaf !== 0,
@@ -62,8 +62,8 @@ export function registerCatalogRoutes(app: FastifyInstance, deps: ApiDeps): void
           node_id: n.node_id,
           display_name: n.display_name,
           executor: n.executor,
-          output_kind: n.output_kind,
-          input_kinds: n.input_kinds,
+          output_nodeparamslot: n.output_nodeparamslot,
+          input_nodeparamslots: n.input_nodeparamslots,
         })),
       })),
     };

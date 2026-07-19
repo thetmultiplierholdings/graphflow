@@ -8,18 +8,18 @@ import { appendToMaster } from '../nodes_shared/append_to_master.js';
 import { ocrBrokerageStatement } from '../nodes_shared/ocr_brokerage_statement.js';
 import { ocrPaymentSlip } from '../nodes_shared/ocr_payment_slip.js';
 import { verifyTxns } from '../nodes_shared/verify_txns.js';
-import { KINDS, Kind } from './enums.js';
+import { NODEPARAMSLOTS, Nodeparamslot } from './enums.js';
 import { buildReport } from './nodes_special/build_report.js';
 import { calculateTax } from './nodes_special/calculate_tax.js';
 
 export const taxDemoWorkflow = defineWorkflow({
   id: 'tax_demo_workflow',
   displayName: 'Tax demo workflow',
-  kinds: KINDS,
+  nodeparamslots: NODEPARAMSLOTS,
   nodes: [ocrBrokerageStatement, ocrPaymentSlip, verifyTxns, appendToMaster, calculateTax, buildReport],
   run: async (ctx) => {
-    const statements = ctx.attached(Kind.BrokerageStatement);
-    const slips = ctx.attached(Kind.PaymentSlip);
+    const statements = ctx.attached(Nodeparamslot.BrokerageStatement);
+    const slips = ctx.attached(Nodeparamslot.PaymentSlip);
 
     const brokerageChain = async (doc: ArtifactHandle): Promise<ArtifactHandle> => {
       const ocr = await ctx.node(ocrBrokerageStatement, { statement: doc });

@@ -26,7 +26,7 @@ export interface TaskInfo {
   workflow_id: string;
   node_id: string;
   memo_key: string;
-  output_kind: string;
+  output_nodeparamslot: string;
   display_name: string;
   instructions: string;
   payload: Record<string, JsonValue>;

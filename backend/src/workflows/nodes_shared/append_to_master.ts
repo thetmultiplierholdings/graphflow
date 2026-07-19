@@ -2,13 +2,13 @@
 // sharing contract). File name == node_id, one node per file.
 import type { ArtifactHandle } from '../../domain/artifact/ArtifactHandle.js';
 import { defineNode } from '../../domain/registry/Registry.js';
-import { SharedKind, SharedNodeId } from './enums.js';
+import { SharedNodeId, SharedNodeparamslot } from './enums.js';
 import type { Txn } from './helpers.js';
 
 export const appendToMaster = defineNode({
   name: SharedNodeId.AppendToMaster,
-  outputKind: SharedKind.MasterTxnList,
-  inputKinds: { batches: SharedKind.VerifiedTxns },
+  outputNodeparamslot: SharedNodeparamslot.MasterTxnList,
+  inputNodeparamslots: { batches: SharedNodeparamslot.VerifiedTxns },
   displayName: 'Append to master transaction list (FOLD)',
   run: async ({ batches }: { batches: ArtifactHandle[] }) => {
     // THE FOLD: N per-document verified batches -> one master list.

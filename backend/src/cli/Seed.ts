@@ -23,8 +23,8 @@ import type { Summary } from '../temporal/Context.js';
 import { HUMAN_TASK_WORKFLOW_TYPE, humanTaskIdPrefix, RUN_WORKFLOW_TYPE, runIdPrefix } from '../temporal/Ids.js';
 import type { WorkerHandle } from '../temporal/Runtime.js';
 import { connectClient, createWorker, startWorkspace } from '../temporal/Runtime.js';
-import { Kind as V1Kind } from '../workflows/tax_demo_workflow/enums.js';
-import { Kind as V2Kind } from '../workflows/tax_demo_workflow_v2/enums.js';
+import { Nodeparamslot as V1Nodeparamslot } from '../workflows/tax_demo_workflow/enums.js';
+import { Nodeparamslot as V2Nodeparamslot } from '../workflows/tax_demo_workflow_v2/enums.js';
 import type { AutoApprover } from './Inbox.js';
 import { listOpenHumanTasks, startAutoApprover } from './Inbox.js';
 import { buildCliRegistry, cmdInit, executeWorkspace, out, quotedList } from './Shared.js';
@@ -32,8 +32,8 @@ import { buildCliRegistry, cmdInit, executeWorkspace, out, quotedList } from './
 const BROKERAGE = ['morgan_stanley.txt', 'goldman_sachs.txt', 'fidelity.txt'];
 const SLIPS = ['payslip_jan.txt', 'payslip_feb.txt', 'payslip_mar.txt'];
 const EXTRA: readonly (readonly [string, string])[] = [
-  ['extra_ubs.txt', V1Kind.BrokerageStatement],
-  ['extra_payslip_apr.txt', V1Kind.PaymentSlip],
+  ['extra_ubs.txt', V1Nodeparamslot.BrokerageStatement],
+  ['extra_payslip_apr.txt', V1Nodeparamslot.PaymentSlip],
 ];
 
 // Reads sample_docs cwd-relative; the CLI must run from backend/.
@@ -43,15 +43,15 @@ function supplyAndAttach(
   engagementId: number,
   workflowRunId: number,
   filename: string,
-  kind: string
+  nodeparamslot: string
 ): void {
   const data = readFileSync(join('sample_docs', filename));
-  const ref = supplyArtifact(conn, storageRoot, engagementId, kind, data, {
-    label: filename.replaceAll('.txt', ''),
+  const ref = supplyArtifact(conn, storageRoot, engagementId, nodeparamslot, data, {
+    displayName: filename.replaceAll('.txt', ''),
     createdBy: 'user:demo-user',
   });
   attach(conn, workflowRunId, ref.artifact_id, { source: 'user', createdBy: 'user:demo-user' });
-  out(`  [upload] ${filename} -> ${kind} artifact#${ref.artifact_id} (${ref.hash.slice(0, 10)})`);
+  out(`  [upload] ${filename} -> ${nodeparamslot} artifact#${ref.artifact_id} (${ref.hash.slice(0, 10)})`);
 }
 
 function printSummary(tag: string, summary: Summary): void {
@@ -63,14 +63,16 @@ function printSummary(tag: string, summary: Summary): void {
 }
 
 function printReport(conn: Database.Database, storageRoot: string, workflowRunId: number, tag: string): void {
-  const reports = workspaceArtifacts(conn, workflowRunId).filter((a) => a.kind === V1Kind.FinalReport);
+  const reports = workspaceArtifacts(conn, workflowRunId).filter(
+    (a) => a.nodeparamslot === V1Nodeparamslot.FinalReport
+  );
   const latest = reports.at(-1);
   if (latest === undefined) {
     out(`  [${tag}] no final_report artifact in workspace`);
     return;
   }
   const text = new TextDecoder().decode(readArtifactPayload(conn, storageRoot, latest.artifact_id));
-  out(`\n  [${tag}] final report (artifact#${latest.artifact_id}, label=${latest.label}):\n`);
+  out(`\n  [${tag}] final report (artifact#${latest.artifact_id}, display_name=${latest.display_name}):\n`);
   const lines = text.split('\n');
   if (lines.at(-1) === '') {
     lines.pop(); // drop the trailing empty segment from the final newline
@@ -113,10 +115,10 @@ export async function cmdDemo(env: Env): Promise<void> {
     out(`\n== SCENARIO 1: January from scratch (engagement ${eng}) ==`);
     const jan = createWorkspace(conn, eng, 'tax_demo_workflow', 'January estimate', { createdBy: 'user:demo-user' });
     for (const f of BROKERAGE) {
-      supplyAndAttach(conn, env.storageRoot, eng, jan, f, V1Kind.BrokerageStatement);
+      supplyAndAttach(conn, env.storageRoot, eng, jan, f, V1Nodeparamslot.BrokerageStatement);
     }
     for (const f of SLIPS) {
-      supplyAndAttach(conn, env.storageRoot, eng, jan, f, V1Kind.PaymentSlip);
+      supplyAndAttach(conn, env.storageRoot, eng, jan, f, V1Nodeparamslot.PaymentSlip);
     }
     const summary = await executeWorkspace(client, env.dbPath, jan, env.temporalTaskQueue);
     printSummary('January #1', summary);
@@ -135,8 +137,8 @@ export async function cmdDemo(env: Env): Promise<void> {
       createdBy: 'user:demo-user',
       copiedFrom: jan,
     });
-    for (const [f, kind] of EXTRA) {
-      supplyAndAttach(conn, env.storageRoot, eng, feb, f, kind);
+    for (const [f, nodeparamslot] of EXTRA) {
+      supplyAndAttach(conn, env.storageRoot, eng, feb, f, nodeparamslot);
     }
     const summary3 = await executeWorkspace(client, env.dbPath, feb, env.temporalTaskQueue);
     printSummary('February', summary3);
@@ -238,7 +240,7 @@ function printSeedTotals(conn: Database.Database, engagementIds: readonly number
     const e = getEngagement(conn, engId);
     const s = stats(conn, engId);
     out(
-      `    ${e.label}: ${s.workspaces} workspaces, ${s.artifacts} artifacts, ` +
+      `    ${e.display_name}: ${s.workspaces} workspaces, ${s.artifacts} artifacts, ` +
         `${s.node_runs} node_runs (${s.human_answers} human answers)`
     );
   }
@@ -273,15 +275,15 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
       out(`\n  [seed] engagement ${acme}: Acme Ltd — UK Tax FY 2025/26`);
       const jan = createWorkspace(conn, acme, 'tax_demo_workflow', 'January estimate', { createdBy: 'user:thet' });
       for (const f of BROKERAGE) {
-        supplyAndAttach(conn, env.storageRoot, acme, jan, f, V1Kind.BrokerageStatement);
+        supplyAndAttach(conn, env.storageRoot, acme, jan, f, V1Nodeparamslot.BrokerageStatement);
       }
       for (const f of SLIPS) {
-        supplyAndAttach(conn, env.storageRoot, acme, jan, f, V1Kind.PaymentSlip);
+        supplyAndAttach(conn, env.storageRoot, acme, jan, f, V1Nodeparamslot.PaymentSlip);
       }
       const summary = await executeWorkspace(client, env.dbPath, jan, env.temporalTaskQueue);
       printSummary('seed/January', summary);
 
-      const reports = workspaceArtifacts(conn, jan).filter((a) => a.kind === V1Kind.FinalReport);
+      const reports = workspaceArtifacts(conn, jan).filter((a) => a.nodeparamslot === V1Nodeparamslot.FinalReport);
       const lastReport = reports.at(-1);
       if (lastReport !== undefined) {
         renameArtifact(conn, lastReport.artifact_id, 'January estimate — sent to client', 'user:thet');
@@ -293,8 +295,8 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
         createdBy: 'user:thet',
         copiedFrom: jan,
       });
-      for (const [f, kind] of EXTRA) {
-        supplyAndAttach(conn, env.storageRoot, acme, feb, f, kind);
+      for (const [f, nodeparamslot] of EXTRA) {
+        supplyAndAttach(conn, env.storageRoot, acme, feb, f, nodeparamslot);
       }
       out(`  [seed] workspace ${feb} 'February estimate' staged (not executed)`);
 
@@ -306,8 +308,8 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
       const bh = createEngagement(conn, 'Blue Harbour LLP — UK Tax FY 2025/26', { createdBy: 'user:thet' });
       out(`\n  [seed] engagement ${bh}: Blue Harbour LLP — UK Tax FY 2025/26`);
       const q1 = createWorkspace(conn, bh, 'tax_demo_workflow_v2', 'Q1 estimate', { createdBy: 'user:thet' });
-      supplyAndAttach(conn, env.storageRoot, bh, q1, 'bh_schwab.txt', V2Kind.BrokerageStatement);
-      supplyAndAttach(conn, env.storageRoot, bh, q1, 'bh_payslip_feb.txt', V2Kind.PaymentSlip);
+      supplyAndAttach(conn, env.storageRoot, bh, q1, 'bh_schwab.txt', V2Nodeparamslot.BrokerageStatement);
+      supplyAndAttach(conn, env.storageRoot, bh, q1, 'bh_payslip_feb.txt', V2Nodeparamslot.PaymentSlip);
       // The questionnaire channel: answers are canonical JSON so a re-answered identical form
       // converges on the same artifact (the API route canonicalizes via canonical_json=true; the
       // seed canonicalizes directly).
@@ -315,18 +317,20 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
         conn,
         env.storageRoot,
         bh,
-        V2Kind.ResidencyAnswers,
+        V2Nodeparamslot.ResidencyAnswers,
         canonicalBytes({ country: 'SG' }),
-        { label: 'residency-questionnaire', mediaType: 'application/json', createdBy: 'user:thet' }
+        { displayName: 'residency-questionnaire', mediaType: 'application/json', createdBy: 'user:thet' }
       );
       attach(conn, q1, residency.artifact_id, { source: 'user', createdBy: 'user:thet' });
-      out(`  [upload] residency questionnaire -> ${V2Kind.ResidencyAnswers} artifact#${residency.artifact_id}`);
+      out(
+        `  [upload] residency questionnaire -> ${V2Nodeparamslot.ResidencyAnswers} artifact#${residency.artifact_id}`
+      );
       const handle = await startWorkspace(client, env.dbPath, q1, env.temporalTaskQueue, false);
       out(`  [seed] started ${handle.workflowId} — leaving it waiting on human review`);
 
       const openTaskIds = await waitForOpenVerifyTasks(client, env, instance, bh);
 
-      // -- summary (labels + counts, no secrets)
+      // -- summary (display names + counts, no secrets)
       printSeedTotals(conn, [acme, bh], openTaskIds.length);
     } finally {
       if (approver !== null) {

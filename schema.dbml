@@ -7,20 +7,20 @@
 //     a +00:00 suffix at seconds precision (nowIso in Db.ts) — lexicographic order == time order.
 //   - executor / source columns are TEXT with CHECK constraints in SQLite; modeled as enums here.
 //   - LEDGER tables (artifacts, node_runs, node_run_inputs) are insert-only; the mutable ledger
-//     columns are artifacts.label and its updated_by/updated_at stamps. WORKSPACE rows are
+//     columns are artifacts.display_name and its updated_by/updated_at stamps. WORKSPACE rows are
 //     editable; deleting a workflow_run_artifacts row (detach) is the only user-facing DELETE —
-//     the other DELETEs are the publish transaction rewriting the workflow_kinds and
-//     node_input_kinds mirrors.
+//     the other DELETEs are the publish transaction rewriting the workflow_nodeparamslots and
+//     node_input_nodeparamslots mirrors.
 //   - HYGIENE BLOCK, tiered per table role:
 //       . entity tables (engagements, artifacts, workflow_runs): created_by/created_at NOT NULL +
 //         nullable updated_by/updated_at/deleted_at;
 //       . node_runs (insert-only memo ledger): created_by/created_at only;
 //       . workflow_run_artifacts (membership): created_* + updated_* (promotion), no deleted_at —
 //         detach is a hard DELETE, membership is a fact, not an entity;
-//       . catalog masters (workflows, kinds, nodes): created_at + updated_at only — the publisher
+//       . catalog masters (workflows, nodeparamslots, nodes): created_at + updated_at only — the publisher
 //         is always the code registry, so no actor columns; retirement = absence from the registry,
 //         so no deleted_at;
-//       . EXEMPT: meta (k/v singleton), workflow_kinds + node_input_kinds (publish mirrors,
+//       . EXEMPT: meta (k/v singleton), workflow_nodeparamslots + node_input_nodeparamslots (publish mirrors,
 //         rewritten wholesale), node_run_inputs (edges of an immutable parent).
 //     Semantics: created_* is the FIRST filer — convergence (ON CONFLICT DO NOTHING) never
 //     re-dates it; updated_* is NULL until first updated — the idempotent paths (promote upsert,
@@ -48,11 +48,11 @@ Project graphflow {
   SQLite is single-writer; every application write transaction uses BEGIN IMMEDIATE (initDb's
   one-time DDL and instance_id insert run in autocommit).
 
-  READ MODEL (not a table): artifact_facts — a view over artifacts JOIN kinds adding two DERIVED
+  READ MODEL (not a table): artifact_facts — a view over artifacts JOIN nodeparamslots adding two DERIVED
   columns served on the wire: produced_by_node_run := MIN(node_run_id) over
   node_runs.output_artifact_id (several runs can converge on one artifact via the completion
   transaction's ON CONFLICT DO NOTHING; the earliest run wins), and origin := 'produced' when a
-  producing run exists, else 'override' for a hand-supplied computed kind, else the kind's
+  producing run exists, else 'override' for a hand-supplied computed nodeparamslot, else the nodeparamslot's
   authored source. Read models (getArtifact, browseArtifacts, workspaceArtifacts, the API
   serializers) read the view; the memo and write path (memoLookup, recordCompletion,
   supplyArtifact) stays on base tables. Provenance is derived, never stored — nothing can
@@ -73,12 +73,12 @@ enum attachment_source {
 }
 
 // TEXT CHECK (source IN (upload, questionnaire, email, computed)) in SQLite. The channel data
-// of this kind enters through: upload/questionnaire/email are LEAF channels (supplied by users; email
-// is declared but has no channel behind it yet); computed kinds are produced by nodes.
+// of this nodeparamslot enters through: upload/questionnaire/email are LEAF channels (supplied by users; email
+// is declared but has no channel behind it yet); computed nodeparamslots are produced by nodes.
 // Leaf-NESS itself is never stored: it is derived per workflow (no node of the workflow produces
-// the kind — catalogSnapshot in Db.ts) and reconciled against this authored channel at publish
+// the nodeparamslot — catalogSnapshot in Db.ts) and reconciled against this authored channel at publish
 // (validateCatalog in Registry.ts). NOT NULL is deliberate: SQLite CHECKs pass on NULL.
-enum kind_source {
+enum nodeparamslot_source {
   upload
   questionnaire
   email
@@ -93,7 +93,7 @@ Table meta {
 
 Table engagements {
   engagement_id integer [pk]
-  label text [not null]
+  display_name text [not null]
   created_by text [not null]
   created_at text [not null]
   updated_by text [note: 'writer-less today: no engagement PATCH exists, so updated_* stays NULL (tier-uniform column, not a promise of behavior)']
@@ -103,65 +103,65 @@ Table engagements {
 }
 
 // ---------- CATALOG (mirror of the in-code registry, republished by publishCatalog on every
-// boot/init after validateCatalog passes. kinds/workflows/nodes are upsert-only — retired rows
+// boot/init after validateCatalog passes. nodeparamslots/workflows/nodes are upsert-only — retired rows
 // persist as FK parents, and executing a workspace pinned to a retired workflow fails loud —
 // the run starts, then GraphflowRun throws non-retryable "not registered on this worker"
-// (Workflows.ts) — instead of vanishing — while workflow_kinds and node_input_kinds are rewritten
+// (Workflows.ts) — instead of vanishing — while workflow_nodeparamslots and node_input_nodeparamslots are rewritten
 // delete-then-insert inside the publish transaction, so declarations removed from code stop
 // lingering.) ----------
 
-Table kinds {
-  kind text [pk]
-  source kind_source [not null]
-  display_name text [note: 'empty string when the declaration has no display; catalogSnapshot falls back to the kind string']
+Table nodeparamslots {
+  nodeparamslot text [pk]
+  source nodeparamslot_source [not null]
+  display_name text [note: 'empty string when the declaration has no display; catalogSnapshot falls back to the nodeparamslot string']
   created_at text [not null, note: 'first publish']
   updated_at text [note: 'last real change to THIS row\'s columns (source/display — guarded upsert); NULL until one; identical republish on worker restart does not bump it']
-  Note: 'The instance-wide kind vocabulary — a first-class business object and the FK parent of artifacts.kind, nodes.output_kind, workflow_kinds.kind, and node_input_kinds.kind. supplyArtifact rejects kinds absent from this table BEFORE writing any payload bytes. Supplying a computed kind stays legal and derives origin=override (hand-staging a corrected intermediate is supported). Cross-workflow consistency (one kind = one source + display) is a publish error, not first-wins.'
+  Note: 'The instance-wide nodeparamslot vocabulary — a first-class business object and the FK parent of artifacts.nodeparamslot, nodes.output_nodeparamslot, workflow_nodeparamslots.nodeparamslot, and node_input_nodeparamslots.nodeparamslot. supplyArtifact rejects nodeparamslots absent from this table BEFORE writing any payload bytes. Supplying a computed nodeparamslot stays legal and derives origin=override (hand-staging a corrected intermediate is supported). Cross-workflow consistency (one nodeparamslot = one source + display) is a publish error, not first-wins.'
 }
 
 Table workflows {
   workflow_id text [pk, note: '== the folder name under backend/src/workflows/ (enforced by npm run check:workflows)']
   display_name text [not null]
   created_at text [not null, note: 'first publish']
-  updated_at text [note: 'last real change to THIS row\'s columns, i.e. display_name (guarded upsert) — node/kind edits bump their own rows, not this; served on /catalog, git stays the full audit trail']
+  updated_at text [note: 'last real change to THIS row\'s columns, i.e. display_name (guarded upsert) — node/nodeparamslot edits bump their own rows, not this; served on /catalog, git stays the full audit trail']
   Note: 'Catalog row per authored workflow version — identity + display ONLY. Dispatch metadata lives nowhere in the db: every run starts as the RUN_WORKFLOW_TYPE constant on the env task queue (startWorkspace in Runtime.ts), so run and recovery sweeps agree by construction. The DAG itself is code (the workflow folder\'s run()).'
 }
 
-Table workflow_kinds {
+Table workflow_nodeparamslots {
   workflow_id text [not null, ref: > workflows.workflow_id]
-  kind text [not null, ref: > kinds.kind]
+  nodeparamslot text [not null, ref: > nodeparamslots.nodeparamslot]
   indexes {
-    (workflow_id, kind) [pk]
+    (workflow_id, nodeparamslot) [pk]
   }
-  Note: 'Pure membership: which kinds a workflow declares (drives the ctx.attached() gating via RunInput.declared_kinds, and the attach dialog). Rewritten delete-then-insert at publish; rowid order is declaration order (each enums.ts KINDS array).'
+  Note: 'Pure membership: which nodeparamslots a workflow declares (drives the ctx.attached() gating via RunInput.declared_nodeparamslots, and the attach dialog). Rewritten delete-then-insert at publish; rowid order is declaration order (each enums.ts NODEPARAMSLOTS array).'
 }
 
 Table nodes {
   workflow_id text [not null, ref: > workflows.workflow_id]
   node_id text [not null, note: 'THE version identity: the memo key is sha256(node_id \':\' input_hash), so renaming a node opens a new question universe. Behavior change ⇒ rename (the naming contract); there is no code hash.']
   executor node_executor [not null]
-  output_kind text [not null, ref: > kinds.kind]
+  output_nodeparamslot text [not null, ref: > nodeparamslots.nodeparamslot]
   display_name text
   created_at text [not null, note: 'first publish']
-  updated_at text [note: 'last real change to THIS row\'s columns (executor/output_kind/display — guarded upsert; an inputKinds change moves only the node_input_kinds mirror and bumps nothing); db-only, not served']
+  updated_at text [note: 'last real change to THIS row\'s columns (executor/output_nodeparamslot/display — guarded upsert; an inputNodeparamslots change moves only the node_input_nodeparamslots mirror and bumps nothing); db-only, not served']
   indexes {
     (workflow_id, node_id) [pk]
   }
-  Note: 'Catalog mirror and FK anchor for node_runs. Not routing config: node implementations are compiled into the worker and resolved from the registry by (workflow_id, node_id). Upsert-only: renamed nodes leave their old rows behind (accepted: those rows keep counting as producers in the derived leaf until a reset). Publish validation: a computed kind must have a producing node or be declared intake; a leaf-channel kind must have no producer; one node_id must declare one shape across all workflows.'
+  Note: 'Catalog mirror and FK anchor for node_runs. Not routing config: node implementations are compiled into the worker and resolved from the registry by (workflow_id, node_id). Upsert-only: renamed nodes leave their old rows behind (accepted: those rows keep counting as producers in the derived leaf until a reset). Publish validation: a computed nodeparamslot must have a producing node or be declared intake; a leaf-channel nodeparamslot must have no producer; one node_id must declare one shape across all workflows.'
 }
 
-Table node_input_kinds {
+Table node_input_nodeparamslots {
   workflow_id text [not null]
   node_id text [not null]
   param text [not null, note: 'the parameter name — also a hashed key inside the canonical argument map']
-  kind text [ref: > kinds.kind, note: 'NULL = scalar argument (no artifact kind)']
+  nodeparamslot text [ref: > nodeparamslots.nodeparamslot, note: 'NULL = scalar argument (no artifact nodeparamslot)']
   indexes {
     (workflow_id, node_id, param) [pk]
   }
-  Note: 'The declared input ports: defineNode\'s inputKinds map IS the parameter declaration (params list and paramNames are derived from its keys). Rewritten delete-then-insert at publish; rowid order is declaration order. Enforced at run time in Ctx.node before anything is hashed (enforceInputKinds in Context.ts). Serves the catalog\'s input_kinds wire field — enough to render the dataflow graph without executing it. Deliberately excluded from memo keys and artifact identity.'
+  Note: 'The declared input ports: defineNode\'s inputNodeparamslots map IS the parameter declaration (params list and paramNames are derived from its keys). Rewritten delete-then-insert at publish; rowid order is declaration order. Enforced at run time in Ctx.node before anything is hashed (enforceInputNodeparamslots in Context.ts). Serves the catalog\'s input_nodeparamslots wire field — enough to render the dataflow graph without executing it. Deliberately excluded from memo keys and artifact identity.'
 }
 
-Ref: node_input_kinds.(workflow_id, node_id) > nodes.(workflow_id, node_id)
+Ref: node_input_nodeparamslots.(workflow_id, node_id) > nodes.(workflow_id, node_id)
 
 // ---------- LEDGER (insert-only facts) ----------
 
@@ -169,8 +169,8 @@ Table artifacts {
   artifact_id integer [pk]
   engagement_id integer [not null, ref: > engagements.engagement_id]
   hash text [not null, note: 'sha256 hex of the payload bytes — content identity, no provenance']
-  kind text [not null, ref: > kinds.kind]
-  label text [note: 'the one content-facing mutable ledger column (renameArtifact) — every rename stamps updated_*']
+  nodeparamslot text [not null, ref: > nodeparamslots.nodeparamslot]
+  display_name text [note: 'the one content-facing mutable ledger column (renameArtifact) — every rename stamps updated_*']
   media_type text [not null]
   byte_size integer [not null]
   payload_ref text [note: 'content-addressed write-once location {engagement_id}/{hash} under the storage root; NULL = payload destroyed per policy (content route serves 410) — payload destruction is a policy action on the blob, NOT a row deletion (deleted_at stays orthogonal)']
@@ -180,10 +180,10 @@ Table artifacts {
   updated_at text
   deleted_at text [note: 'dormant (see Conventions, incl. the re-supply trap)']
   indexes {
-    (engagement_id, kind, hash) [unique]
-    (engagement_id, kind, created_at) [name: 'idx_browse']
+    (engagement_id, nodeparamslot, hash) [unique]
+    (engagement_id, nodeparamslot, created_at) [name: 'idx_browse']
   }
-  Note: 'Values. Identity = (engagement_id, kind, payload hash): identical bytes under one kind converge to one row, so different questions can share one answer and re-uploads revive prior work. There is NO producer column — produced_by_node_run and origin are derived by the artifact_facts view (see the project note).'
+  Note: 'Values. Identity = (engagement_id, nodeparamslot, payload hash): identical bytes under one nodeparamslot converge to one row, so different questions can share one answer and re-uploads revive prior work. There is NO producer column — produced_by_node_run and origin are derived by the artifact_facts view (see the project note).'
 }
 
 Table node_runs {
@@ -221,7 +221,7 @@ Table workflow_runs {
   workflow_run_id integer [pk]
   engagement_id integer [not null, ref: > engagements.engagement_id]
   workflow_id text [not null, ref: > workflows.workflow_id]
-  label text [not null]
+  display_name text [not null]
   copied_from_workflow_run integer [ref: > workflow_runs.workflow_run_id, note: 'copy provenance; a copy carries only user-sourced attachments']
   archived_at text [note: 'reversible domain flag (archive/unarchive), deliberately separate from the hygiene block; toggling it stamps updated_*']
   created_by text [not null]
@@ -251,11 +251,11 @@ Table workflow_run_artifacts {
 }
 
 TableGroup catalog {
-  kinds
+  nodeparamslots
   workflows
-  workflow_kinds
+  workflow_nodeparamslots
   nodes
-  node_input_kinds
+  node_input_nodeparamslots
 }
 
 TableGroup ledger {

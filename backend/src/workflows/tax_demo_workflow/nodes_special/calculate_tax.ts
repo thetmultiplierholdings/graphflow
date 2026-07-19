@@ -3,14 +3,14 @@ import type { ArtifactHandle } from '../../../domain/artifact/ArtifactHandle.js'
 import { mulDecimals, quantize2HalfUp, sumDecimals } from '../../../domain/money/DecimalString.js';
 import { defineNode } from '../../../domain/registry/Registry.js';
 import type { Txn } from '../../nodes_shared/helpers.js';
-import { Kind, NodeId } from '../enums.js';
+import { NodeId, Nodeparamslot } from '../enums.js';
 
 const TAX_RATE = '0.25';
 
 export const calculateTax = defineNode({
   name: NodeId.CalculateTax,
-  outputKind: Kind.TaxCalc,
-  inputKinds: { master: Kind.MasterTxnList },
+  outputNodeparamslot: Nodeparamslot.TaxCalc,
+  inputNodeparamslots: { master: Nodeparamslot.MasterTxnList },
   displayName: 'Calculator (mock): sum * 25%',
   run: async ({ master }: { master: ArtifactHandle }) => {
     const m = (await master.json()) as { transactions: Txn[] };

@@ -16,7 +16,7 @@ export function registerEngagementRoutes(app: FastifyInstance, deps: ApiDeps): v
 
   r.post('/engagements', { schema: { body: EngagementCreateSchema } }, async (request): Promise<EngagementOut> => {
     return withConn(deps, (conn) => {
-      const engagementId = createEngagement(conn, request.body.label, { createdBy: 'user' });
+      const engagementId = createEngagement(conn, request.body.display_name, { createdBy: 'user' });
       return engagementOut(conn, getEngagement(conn, engagementId));
     });
   });

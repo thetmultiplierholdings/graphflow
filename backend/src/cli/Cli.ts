@@ -101,11 +101,11 @@ function cmdShow(env: Env, workflowRunId: number): void {
   const conn = connect(env.dbPath);
   try {
     const ws = getWorkspace(conn, workflowRunId);
-    out(`  workspace ${ws.workflow_run_id}: ${ws.label} (${ws.workflow_id}, engagement ${ws.engagement_id})`);
+    out(`  workspace ${ws.workflow_run_id}: ${ws.display_name} (${ws.workflow_id}, engagement ${ws.engagement_id})`);
     for (const a of workspaceArtifacts(conn, workflowRunId)) {
       out(
-        `    #${String(a.artifact_id).padEnd(4)} ${a.kind.padEnd(20)} [${a.source}/${a.origin}] ` +
-          `${a.label ?? ''}  ${a.hash.slice(0, 10)}`
+        `    #${String(a.artifact_id).padEnd(4)} ${a.nodeparamslot.padEnd(20)} [${a.source}/${a.origin}] ` +
+          `${a.display_name ?? ''}  ${a.hash.slice(0, 10)}`
       );
     }
   } finally {

@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { buildRegistry, defineNode, defineWorkflow, type Kind } from '../../domain/registry/Registry.js';
+import { buildRegistry, defineNode, defineWorkflow, type Nodeparamslot } from '../../domain/registry/Registry.js';
 import { RuntimeError, ValidationError } from '../../shared/errors/Errors.js';
 import {
   artifactLineage,
   attach,
-  autoLabel,
+  autoDisplayName,
   browseArtifacts,
   catalogSnapshot,
   connect,
@@ -32,7 +32,7 @@ import {
 // The nowIso format contract — every hygiene timestamp asserts against it.
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/;
 
-// Ledger semantics: revive, kind-scoped content addressing, idempotent completion transaction,
+// Ledger semantics: revive, nodeparamslot-scoped content addressing, idempotent completion transaction,
 // attach promotion, copy-user-rows-only, derived provenance (artifact_facts).
 describe('db ledger', () => {
   let dir: string;
@@ -46,20 +46,20 @@ describe('db ledger', () => {
     storage = join(dir, 'store');
     initDb(dbPath);
     conn = connect(dbPath);
-    // Minimal catalog so FKs hold: the kind vocabulary first (artifacts/nodes FK it), then one
+    // Minimal catalog so FKs hold: the nodeparamslot vocabulary first (artifacts/nodes FK it), then one
     // workflow with one engine node. Explicit column lists — positional inserts break silently on
     // schema evolution.
     const seededAt = nowIso();
     conn.exec('BEGIN IMMEDIATE');
-    conn.exec(`INSERT INTO kinds (kind, source, display_name, created_at) VALUES
+    conn.exec(`INSERT INTO nodeparamslots (nodeparamslot, source, display_name, created_at) VALUES
       ('brokerage_statement','upload','','${seededAt}'),
       ('payment_slip','upload','','${seededAt}'),
-      ('answers_kind','questionnaire','','${seededAt}'),
+      ('answers_nodeparamslot','questionnaire','','${seededAt}'),
       ('k','upload','','${seededAt}'),
-      ('out_kind','computed','','${seededAt}')`);
+      ('out_nodeparamslot','computed','','${seededAt}')`);
     conn.exec(`INSERT INTO workflows (workflow_id, display_name, created_at) VALUES ('wf','WF','${seededAt}')`);
     conn.exec(
-      `INSERT INTO nodes (workflow_id, node_id, executor, output_kind, display_name, created_at) VALUES ('wf','n1','engine','out_kind','N1','${seededAt}')`
+      `INSERT INTO nodes (workflow_id, node_id, executor, output_nodeparamslot, display_name, created_at) VALUES ('wf','n1','engine','out_nodeparamslot','N1','${seededAt}')`
     );
     conn.exec('COMMIT');
     eng = createEngagement(conn, 'test-eng');
@@ -77,7 +77,7 @@ describe('db ledger', () => {
       workflowId: 'wf',
       nodeId: 'n1',
       memoKey: memo,
-      outputKind: 'out_kind',
+      outputNodeparamslot: 'out_nodeparamslot',
       payload,
       mediaType: 'application/json',
       createdBy: 'engine',
@@ -85,7 +85,7 @@ describe('db ledger', () => {
       inputArtifactIds: [],
     });
 
-  test('supply revive: same kind + bytes reuses the row', () => {
+  test('supply revive: same nodeparamslot + bytes reuses the row', () => {
     const a = supplyArtifact(conn, storage, eng, 'brokerage_statement', Buffer.from('BYTES'));
     const b = supplyArtifact(conn, storage, eng, 'brokerage_statement', Buffer.from('BYTES'));
     expect(a.artifact_id).toBe(b.artifact_id); // the revive path
@@ -93,29 +93,29 @@ describe('db ledger', () => {
     expect(b.existed).toBe(true);
   });
 
-  test('same bytes different kind is a new row', () => {
+  test('same bytes different nodeparamslot is a new row', () => {
     const a = supplyArtifact(conn, storage, eng, 'brokerage_statement', Buffer.from('BYTES'));
     const b = supplyArtifact(conn, storage, eng, 'payment_slip', Buffer.from('BYTES'));
-    expect(a.artifact_id).not.toBe(b.artifact_id); // kinds route resolution
+    expect(a.artifact_id).not.toBe(b.artifact_id); // nodeparamslots route resolution
   });
 
-  test('supply guard: a kind absent from the vocabulary is rejected, leaving no orphaned blob', () => {
+  test('supply guard: a nodeparamslot absent from the vocabulary is rejected, leaving no orphaned blob', () => {
     const supply = () => supplyArtifact(conn, storage, eng, 'never_published', Buffer.from('BYTES'));
     expect(supply).toThrow(ValidationError);
-    expect(supply).toThrow("kind 'never_published' is not in the published kind vocabulary");
+    expect(supply).toThrow("nodeparamslot 'never_published' is not in the published nodeparamslot vocabulary");
     // The guard runs BEFORE writePayload: a rejected supply must not leave a content-addressed
     // blob behind (nothing has written to the store yet in this test).
     expect(existsSync(storage) ? readdirSync(storage) : []).toEqual([]);
   });
 
-  test('supplying a computed kind stays legal and derives origin=override', () => {
-    const a = supplyArtifact(conn, storage, eng, 'out_kind', Buffer.from('{"hand":"built"}'));
+  test('supplying a computed nodeparamslot stays legal and derives origin=override', () => {
+    const a = supplyArtifact(conn, storage, eng, 'out_nodeparamslot', Buffer.from('{"hand":"built"}'));
     expect(getArtifact(conn, a.artifact_id).origin).toBe('override');
   });
 
-  test('origin derives from the kind birth channel for leaf supplies', () => {
+  test('origin derives from the nodeparamslot birth channel for leaf supplies', () => {
     const upload = supplyArtifact(conn, storage, eng, 'brokerage_statement', Buffer.from('DOC'));
-    const answers = supplyArtifact(conn, storage, eng, 'answers_kind', Buffer.from('{"q":"a"}'));
+    const answers = supplyArtifact(conn, storage, eng, 'answers_nodeparamslot', Buffer.from('{"q":"a"}'));
     expect(getArtifact(conn, upload.artifact_id).origin).toBe('upload');
     expect(getArtifact(conn, answers.artifact_id).origin).toBe('questionnaire');
   });
@@ -149,7 +149,7 @@ describe('db ledger', () => {
     // Supply the exact bytes a later run will produce: ON CONFLICT DO NOTHING converges both on
     // one row; the artifact_facts producer is the run, and MIN(node_run_id) stays deterministic
     // when a second distinct question converges on the same answer bytes.
-    const supplied = supplyArtifact(conn, storage, eng, 'out_kind', Buffer.from('{"x":1}'));
+    const supplied = supplyArtifact(conn, storage, eng, 'out_nodeparamslot', Buffer.from('{"x":1}'));
     expect(getArtifact(conn, supplied.artifact_id).origin).toBe('override');
     const wfr = createWorkspace(conn, eng, 'wf', 'ws');
     const first = complete(wfr, 'memo-a');
@@ -166,7 +166,7 @@ describe('db ledger', () => {
     expect(artifactLineage(conn, supplied.artifact_id).produced_by?.node_run_id).toBe(runs[0]?.node_run_id);
   });
 
-  test('recordCompletion rejects a non-computed output kind with a typed error', () => {
+  test('recordCompletion rejects a non-computed output nodeparamslot with a typed error', () => {
     const leafOutput = () =>
       recordCompletion(conn, storage, {
         engagementId: eng,
@@ -174,7 +174,7 @@ describe('db ledger', () => {
         workflowId: 'wf',
         nodeId: 'n1',
         memoKey: 'm-leaf',
-        outputKind: 'brokerage_statement',
+        outputNodeparamslot: 'brokerage_statement',
         payload: Buffer.from('X'),
         mediaType: 'text/plain',
         createdBy: 'engine',
@@ -183,7 +183,7 @@ describe('db ledger', () => {
       });
     expect(leafOutput).toThrow(RuntimeError);
     expect(leafOutput).toThrow(
-      "output kind 'brokerage_statement' is a leaf channel ('upload') — runs may only produce computed kinds"
+      "output nodeparamslot 'brokerage_statement' is a leaf channel ('upload') — runs may only produce computed nodeparamslots"
     );
     const unknownOutput = () =>
       recordCompletion(conn, storage, {
@@ -192,14 +192,16 @@ describe('db ledger', () => {
         workflowId: 'wf',
         nodeId: 'n1',
         memoKey: 'm-unknown',
-        outputKind: 'never_published',
+        outputNodeparamslot: 'never_published',
         payload: Buffer.from('X'),
         mediaType: 'text/plain',
         createdBy: 'engine',
         temporalId: 't/1/1',
         inputArtifactIds: [],
       });
-    expect(unknownOutput).toThrow("output kind 'never_published' is not in the published kind vocabulary");
+    expect(unknownOutput).toThrow(
+      "output nodeparamslot 'never_published' is not in the published nodeparamslot vocabulary"
+    );
   });
 
   test('completion files the input edges under the assigned node_run_id (dupes collapse)', () => {
@@ -212,7 +214,7 @@ describe('db ledger', () => {
       workflowId: 'wf',
       nodeId: 'n1',
       memoKey: 'm-inputs',
-      outputKind: 'out_kind',
+      outputNodeparamslot: 'out_nodeparamslot',
       payload: Buffer.from('{"y":2}'),
       mediaType: 'application/json',
       createdBy: 'engine',
@@ -318,7 +320,7 @@ describe('db ledger', () => {
     expect(after?.created_by).toBe('user');
     expect(after?.updated_by).toBe('user:alice');
     expect(after?.updated_at).toMatch(ISO_RE);
-    expect(getArtifact(conn, a.artifact_id).label).toBe('renamed');
+    expect(getArtifact(conn, a.artifact_id).display_name).toBe('renamed');
   });
 
   test('deleted_at is dormant: never set by any operation, never filtered by readers', () => {
@@ -351,7 +353,7 @@ describe('db ledger', () => {
         workflowId: 'wf',
         nodeId: 'n1',
         memoKey: 'm-bad',
-        outputKind: 'out_kind',
+        outputNodeparamslot: 'out_nodeparamslot',
         payload: Buffer.from('{"z":9}'),
         mediaType: 'application/json',
         createdBy: 'robot',
@@ -359,7 +361,7 @@ describe('db ledger', () => {
         inputArtifactIds: [],
       });
     expect(completeBad).toThrow(ValidationError);
-    // The principal guards run BEFORE writePayload — the same no-orphaned-blob rule as the kind
+    // The principal guards run BEFORE writePayload — the same no-orphaned-blob rule as the nodeparamslot
     // guard above.
     expect(existsSync(storage) ? readdirSync(storage) : []).toEqual([]);
     const ok = supplyArtifact(conn, storage, eng, 'k', Buffer.from('OK'));
@@ -403,8 +405,8 @@ describe('db ledger', () => {
   });
 });
 
-// Publish hygiene: validateCatalog gating, upsert-only kinds/workflows/nodes, delete-then-insert
-// mirrors (workflow_kinds, node_input_kinds).
+// Publish hygiene: validateCatalog gating, upsert-only nodeparamslots/workflows/nodes, delete-then-insert
+// mirrors (workflow_nodeparamslots, node_input_nodeparamslots).
 describe('publish catalog', () => {
   let dir: string;
   let conn: Database.Database;
@@ -420,73 +422,77 @@ describe('publish catalog', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const makeNode = (inputKinds: Record<string, string | null>) =>
+  const makeNode = (inputNodeparamslots: Record<string, string | null>) =>
     defineNode({
       name: 'n1',
-      outputKind: 'out_kind',
-      inputKinds,
+      outputNodeparamslot: 'out_nodeparamslot',
+      inputNodeparamslots,
       run: () => ({ ok: true }),
     });
 
-  const makeRegistry = (kinds: readonly Kind[], node = makeNode({ doc: 'doc_kind', note: null })) =>
-    buildRegistry([defineWorkflow({ id: 'wf', kinds, nodes: [node], run: async () => undefined })]);
+  const makeRegistry = (
+    nodeparamslots: readonly Nodeparamslot[],
+    node = makeNode({ doc: 'doc_nodeparamslot', note: null })
+  ) => buildRegistry([defineWorkflow({ id: 'wf', nodeparamslots, nodes: [node], run: async () => undefined })]);
 
   const count = (sql: string): number => {
     const row = conn.prepare<[], { n: number }>(sql).get();
     return row?.n ?? -1;
   };
 
-  test('re-publish with a slimmer vocabulary shrinks the mirrors; kinds/nodes rows persist', () => {
+  test('re-publish with a slimmer vocabulary shrinks the mirrors; nodeparamslots/nodes rows persist', () => {
     const wide = makeRegistry([
-      { kind: 'doc_kind', source: 'upload', display: 'Document' },
-      { kind: 'out_kind', source: 'computed' },
-      { kind: 'extra_kind', source: 'email' },
+      { nodeparamslot: 'doc_nodeparamslot', source: 'upload', display: 'Document' },
+      { nodeparamslot: 'out_nodeparamslot', source: 'computed' },
+      { nodeparamslot: 'extra_nodeparamslot', source: 'email' },
     ]);
     publishCatalog(conn, wide);
-    expect(count('SELECT COUNT(*) AS n FROM workflow_kinds')).toBe(3);
-    expect(count('SELECT COUNT(*) AS n FROM node_input_kinds')).toBe(2);
+    expect(count('SELECT COUNT(*) AS n FROM workflow_nodeparamslots')).toBe(3);
+    expect(count('SELECT COUNT(*) AS n FROM node_input_nodeparamslots')).toBe(2);
 
     const slim = makeRegistry(
       [
-        { kind: 'doc_kind', source: 'upload', display: 'Document' },
-        { kind: 'out_kind', source: 'computed' },
+        { nodeparamslot: 'doc_nodeparamslot', source: 'upload', display: 'Document' },
+        { nodeparamslot: 'out_nodeparamslot', source: 'computed' },
       ],
-      makeNode({ doc: 'doc_kind' })
+      makeNode({ doc: 'doc_nodeparamslot' })
     );
     publishCatalog(conn, slim);
-    // The mirrors are rewritten: the removed kind and the removed param stop lingering.
-    const memberKinds = conn
-      .prepare<[], { kind: string }>('SELECT kind FROM workflow_kinds ORDER BY rowid')
+    // The mirrors are rewritten: the removed nodeparamslot and the removed param stop lingering.
+    const memberNodeparamslots = conn
+      .prepare<[], { nodeparamslot: string }>('SELECT nodeparamslot FROM workflow_nodeparamslots ORDER BY rowid')
       .all()
-      .map((r) => r.kind);
-    expect(memberKinds).toEqual(['doc_kind', 'out_kind']);
+      .map((r) => r.nodeparamslot);
+    expect(memberNodeparamslots).toEqual(['doc_nodeparamslot', 'out_nodeparamslot']);
     const params = conn
-      .prepare<[], { param: string }>('SELECT param FROM node_input_kinds ORDER BY rowid')
+      .prepare<[], { param: string }>('SELECT param FROM node_input_nodeparamslots ORDER BY rowid')
       .all()
       .map((r) => r.param);
     expect(params).toEqual(['doc']);
-    // Upsert-only tables keep retired rows: the kind vocabulary and node rows persist as FK parents.
-    expect(count("SELECT COUNT(*) AS n FROM kinds WHERE kind='extra_kind'")).toBe(1);
+    // Upsert-only tables keep retired rows: the nodeparamslot vocabulary and node rows persist as FK parents.
+    expect(count("SELECT COUNT(*) AS n FROM nodeparamslots WHERE nodeparamslot='extra_nodeparamslot'")).toBe(1);
     expect(count('SELECT COUNT(*) AS n FROM nodes')).toBe(1);
   });
 
   test('an invalid registry is rejected before any write', () => {
-    // out_kind is produced by n1 but declared with a leaf source — validateCatalog must refuse.
+    // out_nodeparamslot is produced by n1 but declared with a leaf source — validateCatalog must refuse.
     const bad = makeRegistry([
-      { kind: 'doc_kind', source: 'upload' },
-      { kind: 'out_kind', source: 'upload' },
+      { nodeparamslot: 'doc_nodeparamslot', source: 'upload' },
+      { nodeparamslot: 'out_nodeparamslot', source: 'upload' },
     ]);
     const publish = () => publishCatalog(conn, bad);
     expect(publish).toThrow(ValidationError);
-    expect(publish).toThrow("wf: kind 'out_kind' is produced by a node but declared with leaf source 'upload'");
+    expect(publish).toThrow(
+      "wf: nodeparamslot 'out_nodeparamslot' is produced by a node but declared with leaf source 'upload'"
+    );
     expect(count('SELECT COUNT(*) AS n FROM workflows')).toBe(0);
-    expect(count('SELECT COUNT(*) AS n FROM kinds')).toBe(0);
+    expect(count('SELECT COUNT(*) AS n FROM nodeparamslots')).toBe(0);
   });
 
   test('republish stamps: identical registry is a no-op, a real change bumps updated_at once', () => {
     const registry = makeRegistry([
-      { kind: 'doc_kind', source: 'upload', display: 'Document' },
-      { kind: 'out_kind', source: 'computed' },
+      { nodeparamslot: 'doc_nodeparamslot', source: 'upload', display: 'Document' },
+      { nodeparamslot: 'out_nodeparamslot', source: 'computed' },
     ]);
     publishCatalog(conn, registry);
     const wfStamps = () =>
@@ -506,30 +512,32 @@ describe('publish catalog', () => {
         .get();
       return row?.n ?? -1;
     };
-    expect(staleStamps('kinds')).toBe(0);
+    expect(staleStamps('nodeparamslots')).toBe(0);
     expect(staleStamps('nodes')).toBe(0);
 
-    // A real change (kind display rename) bumps that row's updated_at; created_at holds.
+    // A real change (nodeparamslot display rename) bumps that row's updated_at; created_at holds.
     const changed = makeRegistry([
-      { kind: 'doc_kind', source: 'upload', display: 'Document v2' },
-      { kind: 'out_kind', source: 'computed' },
+      { nodeparamslot: 'doc_nodeparamslot', source: 'upload', display: 'Document v2' },
+      { nodeparamslot: 'out_nodeparamslot', source: 'computed' },
     ]);
     publishCatalog(conn, changed);
-    const kindStamp = conn
+    const nodeparamslotStamp = conn
       .prepare<[], { created_at: string; updated_at: string | null }>(
-        "SELECT created_at, updated_at FROM kinds WHERE kind='doc_kind'"
+        "SELECT created_at, updated_at FROM nodeparamslots WHERE nodeparamslot='doc_nodeparamslot'"
       )
       .get();
-    expect(kindStamp?.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/);
+    expect(nodeparamslotStamp?.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/);
     expect(wfStamps()?.created_at).toBe(first?.created_at); // workflows row unchanged, not re-dated
     expect(wfStamps()?.updated_at).toBeNull();
 
     // NULL-safe compare (IS NOT): a NULL→value display flip counts as a change, not a crash/no-op.
-    conn.prepare("UPDATE kinds SET display_name=NULL, updated_at=NULL WHERE kind='doc_kind'").run();
+    conn
+      .prepare("UPDATE nodeparamslots SET display_name=NULL, updated_at=NULL WHERE nodeparamslot='doc_nodeparamslot'")
+      .run();
     publishCatalog(conn, changed);
     const flipped = conn
       .prepare<[], { display_name: string | null; updated_at: string | null }>(
-        "SELECT display_name, updated_at FROM kinds WHERE kind='doc_kind'"
+        "SELECT display_name, updated_at FROM nodeparamslots WHERE nodeparamslot='doc_nodeparamslot'"
       )
       .get();
     expect(flipped?.display_name).toBe('Document v2');
@@ -538,19 +546,19 @@ describe('publish catalog', () => {
 
   test('catalogSnapshot serves declaration order and the display fallback', () => {
     const registry = makeRegistry([
-      { kind: 'doc_kind', source: 'upload', display: 'Document' },
-      { kind: 'out_kind', source: 'computed' },
+      { nodeparamslot: 'doc_nodeparamslot', source: 'upload', display: 'Document' },
+      { nodeparamslot: 'out_nodeparamslot', source: 'computed' },
     ]);
     publishCatalog(conn, registry);
     const snapshot = catalogSnapshot(conn);
     expect(snapshot).toHaveLength(1);
     const wf = snapshot[0];
-    expect(wf?.kinds.map((k) => k.kind)).toEqual(['doc_kind', 'out_kind']);
-    expect(wf?.kinds.map((k) => k.leaf)).toEqual([1, 0]);
-    // Kinds declared without a display fall back to the kind string — never an empty badge.
-    expect(wf?.kinds.map((k) => k.display_name)).toEqual(['Document', 'out_kind']);
-    expect(wf?.nodes[0]?.input_kinds).toEqual({ doc: 'doc_kind', note: null });
-    expect(Object.keys(wf?.nodes[0]?.input_kinds ?? {})).toEqual(['doc', 'note']);
+    expect(wf?.nodeparamslots.map((k) => k.nodeparamslot)).toEqual(['doc_nodeparamslot', 'out_nodeparamslot']);
+    expect(wf?.nodeparamslots.map((k) => k.leaf)).toEqual([1, 0]);
+    // Nodeparamslots declared without a display fall back to the nodeparamslot string — never an empty badge.
+    expect(wf?.nodeparamslots.map((k) => k.display_name)).toEqual(['Document', 'out_nodeparamslot']);
+    expect(wf?.nodes[0]?.input_nodeparamslots).toEqual({ doc: 'doc_nodeparamslot', note: null });
+    expect(Object.keys(wf?.nodes[0]?.input_nodeparamslots ?? {})).toEqual(['doc', 'note']);
   });
 });
 
@@ -561,16 +569,16 @@ describe('db helpers', () => {
     expect(Math.abs(new Date(s).getTime() - Date.now())).toBeLessThan(2000);
   });
 
-  test('autoLabel: {kind}_DDMMYY_HHMMSS in UTC', () => {
+  test('autoDisplayName: {nodeparamslot}_DDMMYY_HHMMSS in UTC', () => {
     const ddmmyy = (d: Date): string => {
       const two = (n: number): string => String(n).padStart(2, '0');
       return `${two(d.getUTCDate())}${two(d.getUTCMonth() + 1)}${two(d.getUTCFullYear() % 100)}`;
     };
     const before = ddmmyy(new Date());
-    const label = autoLabel('tax_report');
+    const displayName = autoDisplayName('tax_report');
     const after = ddmmyy(new Date());
-    expect(label).toMatch(/^tax_report_\d{6}_\d{6}$/);
-    const datePart = label.slice('tax_report_'.length, 'tax_report_'.length + 6);
+    expect(displayName).toMatch(/^tax_report_\d{6}_\d{6}$/);
+    const datePart = displayName.slice('tax_report_'.length, 'tax_report_'.length + 6);
     expect([before, after]).toContain(datePart);
   });
 

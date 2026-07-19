@@ -1,6 +1,6 @@
 // THE SHARED CONTRACT: the vocabulary of nodes shared across workflow versions (nodes_shared/
 // is a shared-code library, not a workflow folder — it has no workflow.ts and never publishes by
-// itself). Per-workflow enums compose these into their own Kind/NodeId/KINDS, so a shared kind is
+// itself). Per-workflow enums compose these into their own Nodeparamslot/NodeId/NODEPARAMSLOTS, so a shared nodeparamslot is
 // declared once and can never disagree between workflows. `as const` objects, not TS enums: the
 // per-workflow vocabularies are built by spreading these.
 //
@@ -12,9 +12,9 @@
 // belong here; it lives in each workflow folder's nodes_special/. One node per file, file name ==
 // node_id (enforced by npm run check:workflows).
 
-import type { Kind as KindDeclaration } from '../../domain/registry/Registry.js';
+import type { Nodeparamslot as NodeparamslotDeclaration } from '../../domain/registry/Registry.js';
 
-export const SharedKind = {
+export const SharedNodeparamslot = {
   BrokerageStatement: 'brokerage_statement',
   PaymentSlip: 'payment_slip',
   OcrTxns: 'ocr_txns',
@@ -29,10 +29,10 @@ export const SharedNodeId = {
   AppendToMaster: 'append_to_master',
 } as const;
 
-export const SHARED_KINDS: readonly KindDeclaration[] = [
-  { kind: SharedKind.BrokerageStatement, source: 'upload', display: 'Brokerage statement (PDF)' },
-  { kind: SharedKind.PaymentSlip, source: 'upload', display: 'Payment slip (PDF)' },
-  { kind: SharedKind.OcrTxns, source: 'computed' },
-  { kind: SharedKind.VerifiedTxns, source: 'computed' },
-  { kind: SharedKind.MasterTxnList, source: 'computed' },
+export const SHARED_NODEPARAMSLOTS: readonly NodeparamslotDeclaration[] = [
+  { nodeparamslot: SharedNodeparamslot.BrokerageStatement, source: 'upload', display: 'Brokerage statement (PDF)' },
+  { nodeparamslot: SharedNodeparamslot.PaymentSlip, source: 'upload', display: 'Payment slip (PDF)' },
+  { nodeparamslot: SharedNodeparamslot.OcrTxns, source: 'computed' },
+  { nodeparamslot: SharedNodeparamslot.VerifiedTxns, source: 'computed' },
+  { nodeparamslot: SharedNodeparamslot.MasterTxnList, source: 'computed' },
 ];

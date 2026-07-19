@@ -55,19 +55,19 @@ never imports `node:*`—hashing inside the sandbox uses `@noble/hashes`.
 `memo_key = sha256(node_id ':' input_hash)` (`memoKey` in `src/domain/canonical/Canonical.ts`).
 Nodes meant to span versions live ONCE in `src/workflows/nodes_shared/` and are listed by every
 workflow that uses them — same name, same code, same memo hits, including answers given by
-humans. A behavior change—body, helper, validator, output kind, executor—forces a RENAME
+humans. A behavior change—body, helper, validator, output nodeparamslot, executor—forces a RENAME
 (`calculate_tax` → `calculate_tax_v2`) and belongs in the owning workflow's `nodes_special/`;
 an edit to a shared node under an unchanged name changes every workflow that lists it, which is
 why shared code must never carry versioned behavior. One node per file, file name == node_id
 (enforced by `npm run check:workflows`). There is no mechanical tripwire for a forgotten rename;
 `validateCatalog` (in `src/domain/registry/Registry.ts`, run by every publish) catches the
-declared-shape divergences it can (same name, different executor/output/inputKinds/display
+declared-shape divergences it can (same name, different executor/output/inputNodeparamslots/display
 across workflows) and the rest is the contract.
 
-**Kinds are first-class.** A global `kinds` table classifies every kind by its birth channel
-(`upload` / `questionnaire` / `email` / `computed`); `artifacts.kind` and `nodes.output_kind` FK
-it, and `supplyArtifact` rejects unknown kinds. Every node declares a total `inputKinds` map
-(param → consumed kind, or null for scalar), published to `node_input_kinds` and enforced at run
+**Nodeparamslots are first-class.** A global `nodeparamslots` table classifies every nodeparamslot by its birth channel
+(`upload` / `questionnaire` / `email` / `computed`); `artifacts.nodeparamslot` and `nodes.output_nodeparamslot` FK
+it, and `supplyArtifact` rejects unknown nodeparamslots. Every node declares a total `inputNodeparamslots` map
+(param → consumed nodeparamslot, or null for scalar), published to `node_input_nodeparamslots` and enforced at run
 time before hashing. Artifact provenance is DERIVED, never stored: the `artifact_facts` view
 computes `produced_by_node_run` (earliest producing run) and `origin`
 (`produced | upload | questionnaire | email | override`). Questionnaire answers are canonicalized
@@ -85,7 +85,7 @@ carry a 5s deadline: an unhealthy task drops out of one sweep rather than wedgin
 src/
   domain/          pure, bundle-safe (canonical JSON + hashing, registry factories, ArtifactHandle, decimal strings)
   workflows/       THE PRODUCT—one folder per workflow version (folder name == workflow_id); each
-                   holds workflow.ts (the DAG) + enums.ts (its Kind/NodeId vocabulary + KINDS
+                   holds workflow.ts (the DAG) + enums.ts (its Nodeparamslot/NodeId vocabulary + NODEPARAMSLOTS
                    declarations) + nodes_special/ (this version's behavior, one node per file,
                    file name == node_id). nodes_shared/ is the version-spanning library: shared
                    nodes (same layout) + the shared vocabulary

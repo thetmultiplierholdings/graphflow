@@ -134,7 +134,7 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
             throw new ValidationError('copy_from must be a workspace in the same engagement');
           }
         }
-        const wfr = createWorkspace(conn, engagementId, body.workflow_id, body.label, {
+        const wfr = createWorkspace(conn, engagementId, body.workflow_id, body.display_name, {
           createdBy: 'user',
           copiedFrom: copyFrom,
         });
@@ -159,22 +159,22 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
       const body = request.body;
       return withConn(deps, (conn) => {
         getWorkspace(conn, workflowRunId);
-        const label = body.label ?? null;
+        const displayName = body.display_name ?? null;
         const workflowId = body.workflow_id ?? null;
         if (workflowId !== null && !workflowInCatalog(conn, workflowId)) {
           throw new ValidationError(`workflow '${workflowId}' is not in the catalog`);
         }
         // PATCH {} changes nothing — skip the UPDATE so updated_* records only real changes.
-        if (label === null && workflowId === null) {
+        if (displayName === null && workflowId === null) {
           return workspaceDetail(conn, workflowRunId);
         }
         conn.exec('BEGIN IMMEDIATE');
         try {
           conn
             .prepare(
-              'UPDATE workflow_runs SET label=COALESCE(?, label), workflow_id=COALESCE(?, workflow_id), updated_by=?, updated_at=? WHERE workflow_run_id=?'
+              'UPDATE workflow_runs SET display_name=COALESCE(?, display_name), workflow_id=COALESCE(?, workflow_id), updated_by=?, updated_at=? WHERE workflow_run_id=?'
             )
-            .run(label, workflowId, 'user', nowIso(), workflowRunId);
+            .run(displayName, workflowId, 'user', nowIso(), workflowRunId);
           conn.exec('COMMIT');
         } catch (e) {
           conn.exec('ROLLBACK');

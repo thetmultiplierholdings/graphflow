@@ -2,16 +2,16 @@
 // sharing contract). File name == node_id, one node per file.
 import type { ArtifactHandle } from '../../domain/artifact/ArtifactHandle.js';
 import { defineNode } from '../../domain/registry/Registry.js';
-import { SharedKind, SharedNodeId } from './enums.js';
+import { SharedNodeId, SharedNodeparamslot } from './enums.js';
 import { parseTransactionLines } from './helpers.js';
 
 export const ocrBrokerageStatement = defineNode({
   name: SharedNodeId.OcrBrokerageStatement,
-  outputKind: SharedKind.OcrTxns,
-  inputKinds: { statement: SharedKind.BrokerageStatement },
+  outputNodeparamslot: SharedNodeparamslot.OcrTxns,
+  inputNodeparamslots: { statement: SharedNodeparamslot.BrokerageStatement },
   displayName: 'OCR brokerage statement (mock)',
   run: async ({ statement }: { statement: ArtifactHandle }) => ({
-    doc_kind: SharedKind.BrokerageStatement,
+    doc_nodeparamslot: SharedNodeparamslot.BrokerageStatement,
     transactions: parseTransactionLines(await statement.text()),
   }),
 });

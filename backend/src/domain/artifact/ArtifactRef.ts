@@ -3,7 +3,7 @@
 export interface ArtifactRef {
   artifact_id: number;
   hash: string;
-  kind: string;
-  label: string | null;
+  nodeparamslot: string;
+  display_name: string | null;
   media_type: string | null;
 }

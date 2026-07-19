@@ -23,8 +23,8 @@ export interface ArtifactMetaOut {
   artifact_id: number;
   engagement_id: number;
   hash: string;
-  kind: string;
-  label: string | null;
+  nodeparamslot: string;
+  display_name: string | null;
   media_type: string;
   byte_size: number;
   produced_by_node_run: number | null;
@@ -58,7 +58,7 @@ export interface WorkspaceDetailOut {
   workflow_run_id: number;
   engagement_id: number;
   workflow_id: string;
-  label: string;
+  display_name: string;
   copied_from_workflow_run: number | null;
   archived_at: string | null;
   created_by: string;
@@ -73,7 +73,7 @@ export interface WorkspaceListOut {
   workflow_run_id: number;
   engagement_id: number;
   workflow_id: string;
-  label: string;
+  display_name: string;
   copied_from_workflow_run: number | null;
   archived_at: string | null;
   created_by: string;
@@ -86,7 +86,7 @@ export interface WorkspaceListOut {
 
 export interface EngagementOut {
   engagement_id: number;
-  label: string;
+  display_name: string;
   created_by: string;
   created_at: string;
   updated_by: string | null;
@@ -99,8 +99,8 @@ export function artifactMeta(row: ArtifactFactsRow): ArtifactMetaOut {
     artifact_id: row.artifact_id,
     engagement_id: row.engagement_id,
     hash: row.hash,
-    kind: row.kind,
-    label: row.label,
+    nodeparamslot: row.nodeparamslot,
+    display_name: row.display_name,
     media_type: row.media_type,
     byte_size: row.byte_size,
     produced_by_node_run: row.produced_by_node_run,
@@ -153,7 +153,7 @@ export function workspaceDetail(conn: Database.Database, workflowRunId: number):
     workflow_run_id: ws.workflow_run_id,
     engagement_id: ws.engagement_id,
     workflow_id: ws.workflow_id,
-    label: ws.label,
+    display_name: ws.display_name,
     copied_from_workflow_run: ws.copied_from_workflow_run,
     archived_at: ws.archived_at,
     created_by: ws.created_by,
@@ -174,7 +174,7 @@ export function workspaceListOut(row: WorkspaceListRow): WorkspaceListOut {
     workflow_run_id: row.workflow_run_id,
     engagement_id: row.engagement_id,
     workflow_id: row.workflow_id,
-    label: row.label,
+    display_name: row.display_name,
     copied_from_workflow_run: row.copied_from_workflow_run,
     archived_at: row.archived_at,
     created_by: row.created_by,
@@ -189,7 +189,7 @@ export function workspaceListOut(row: WorkspaceListRow): WorkspaceListOut {
 export function engagementOut(conn: Database.Database, row: EngagementRow): EngagementOut {
   return {
     engagement_id: row.engagement_id,
-    label: row.label,
+    display_name: row.display_name,
     created_by: row.created_by,
     created_at: row.created_at,
     updated_by: row.updated_by,

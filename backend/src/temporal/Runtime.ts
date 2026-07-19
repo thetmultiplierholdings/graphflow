@@ -107,7 +107,7 @@ interface WorkspaceStart {
   workflowId: string;
   attachments: ArtifactRef[];
   instance: string;
-  declaredKinds: string[];
+  declaredNodeparamslots: string[];
 }
 
 function loadWorkspaceStart(dbPath: string, workflowRunId: number): WorkspaceStart {
@@ -124,16 +124,18 @@ function loadWorkspaceStart(dbPath: string, workflowRunId: number): WorkspaceSta
     if (wfRow === undefined) {
       throw new RuntimeError(`workflow '${ws.workflow_id}' is not in the catalog (run \`init\` first)`);
     }
-    const declaredKinds = conn
-      .prepare<[string], { kind: string }>('SELECT kind FROM workflow_kinds WHERE workflow_id=?')
+    const declaredNodeparamslots = conn
+      .prepare<[string], { nodeparamslot: string }>(
+        'SELECT nodeparamslot FROM workflow_nodeparamslots WHERE workflow_id=?'
+      )
       .all(ws.workflow_id)
-      .map((r) => r.kind);
+      .map((r) => r.nodeparamslot);
     return {
       engagementId: ws.engagement_id,
       workflowId: ws.workflow_id,
       attachments,
       instance,
-      declaredKinds,
+      declaredNodeparamslots,
     };
   } finally {
     conn.close();
@@ -189,7 +191,7 @@ export async function startWorkspace(
     engagement_id: start.engagementId,
     workflow_run_id: workflowRunId,
     workflow_id: start.workflowId,
-    declared_kinds: start.declaredKinds,
+    declared_nodeparamslots: start.declaredNodeparamslots,
     attachments: start.attachments,
   };
   // Dispatch is the constant workflow type on the caller's (env) task queue — the same value the

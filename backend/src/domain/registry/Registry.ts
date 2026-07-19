@@ -7,16 +7,16 @@ import type { JsonValue } from '../json/JsonValue.js';
 // from the explicit workflows manifest. Pure and bundle-safe—imported by Temporal workflow code,
 // so no node:* imports here.
 
-// The birth channel of a kind: upload/questionnaire/email are leaf channels (reality enters
-// through them); computed kinds are born from nodes. Authored per declaration, reconciled against
-// the derived class (kindClasses) by validateCatalog.
-export type KindSource = 'upload' | 'questionnaire' | 'email' | 'computed';
+// The birth channel of a nodeparamslot: upload/questionnaire/email are leaf channels (reality enters
+// through them); computed nodeparamslots are born from nodes. Authored per declaration, reconciled against
+// the derived class (nodeparamslotClasses) by validateCatalog.
+export type NodeparamslotSource = 'upload' | 'questionnaire' | 'email' | 'computed';
 
-export interface Kind {
-  kind: string;
-  source: KindSource;
+export interface Nodeparamslot {
+  nodeparamslot: string;
+  source: NodeparamslotSource;
   display?: string;
-  // A computed kind with no producing node in this workflow is normally a publish error; intake
+  // A computed nodeparamslot with no producing node in this workflow is normally a publish error; intake
   // declares it as another workflow's output attached as input (legal membership, not a mistake).
   intake?: true;
 }
@@ -34,16 +34,16 @@ export type Dedupe = 'none' | 'hard';
 
 export type NodeResult = JsonValue | string | Uint8Array | HumanTask;
 
-// Every param maps to the artifact kind it consumes, or null for a scalar (non-artifact) argument.
-export type InputKinds = Readonly<Record<string, string | null>>;
+// Every param maps to the artifact nodeparamslot it consumes, or null for a scalar (non-artifact) argument.
+export type InputNodeparamslots = Readonly<Record<string, string | null>>;
 
 export interface NodeDef<P extends Record<string, NodeArgValue> = Record<string, NodeArgValue>, R = NodeResult> {
   readonly nodeId: string;
   readonly executor: Executor;
-  readonly outputKind: string;
-  // Derived: Object.keys(inputKinds) in declaration order — inputKinds is the single source of truth.
+  readonly outputNodeparamslot: string;
+  // Derived: Object.keys(inputNodeparamslots) in declaration order — inputNodeparamslots is the single source of truth.
   readonly paramNames: readonly string[];
-  readonly inputKinds: InputKinds;
+  readonly inputNodeparamslots: InputNodeparamslots;
   readonly dedupe: Dedupe;
   readonly displayName: string;
   readonly resultValidator?: (result: Record<string, JsonValue>) => void;
@@ -54,7 +54,7 @@ export interface NodeDef<P extends Record<string, NodeArgValue> = Record<string,
 
 export interface WorkflowDef {
   readonly workflowId: string;
-  readonly kinds: readonly Kind[];
+  readonly nodeparamslots: readonly Nodeparamslot[];
   readonly displayName: string;
   readonly nodes: readonly NodeDef[];
   readonly run: (ctx: Ctx) => Promise<void>;
@@ -62,11 +62,11 @@ export interface WorkflowDef {
 
 export interface NodeConfig<P extends Record<string, NodeArgValue>, R> {
   name: string;
-  outputKind: string;
+  outputNodeparamslot: string;
   // THE parameter declaration — an entry is a param: its key is the name (key insertion order is
-  // the declared order), its value the consumed artifact kind, or null for a scalar argument.
+  // the declared order), its value the consumed artifact nodeparamslot, or null for a scalar argument.
   // Total by construction: the mapped key forces an entry per key of P at compile time.
-  inputKinds: Readonly<Record<keyof P & string, string | null>>;
+  inputNodeparamslots: Readonly<Record<keyof P & string, string | null>>;
   dedupe?: Dedupe;
   displayName?: string;
   run: (args: P) => R | Promise<R>;
@@ -74,8 +74,8 @@ export interface NodeConfig<P extends Record<string, NodeArgValue>, R> {
 
 export interface HumanNodeConfig<P extends Record<string, NodeArgValue>> {
   name: string;
-  outputKind: string;
-  inputKinds: Readonly<Record<keyof P & string, string | null>>;
+  outputNodeparamslot: string;
+  inputNodeparamslots: Readonly<Record<keyof P & string, string | null>>;
   title?: string;
   resultValidator?: (result: Record<string, JsonValue>) => void;
   run: (args: P) => HumanTask | Promise<HumanTask>;
@@ -83,7 +83,7 @@ export interface HumanNodeConfig<P extends Record<string, NodeArgValue>> {
 
 export interface WorkflowConfig {
   id: string;
-  kinds: readonly Kind[];
+  nodeparamslots: readonly Nodeparamslot[];
   displayName?: string;
   nodes: readonly NodeDef[];
   run: (ctx: Ctx) => Promise<void>;
@@ -93,9 +93,9 @@ export function defineNode<P extends Record<string, NodeArgValue>, R>(cfg: NodeC
   const def: NodeDef<P, R> = {
     nodeId: cfg.name,
     executor: 'engine',
-    outputKind: cfg.outputKind,
-    paramNames: Object.freeze(Object.keys(cfg.inputKinds)),
-    inputKinds: Object.freeze({ ...cfg.inputKinds }),
+    outputNodeparamslot: cfg.outputNodeparamslot,
+    paramNames: Object.freeze(Object.keys(cfg.inputNodeparamslots)),
+    inputNodeparamslots: Object.freeze({ ...cfg.inputNodeparamslots }),
     dedupe: cfg.dedupe ?? 'none',
     displayName: cfg.displayName ?? cfg.name.replaceAll('_', ' '),
     run: cfg.run,
@@ -109,9 +109,9 @@ export function defineHumanNode<P extends Record<string, NodeArgValue>>(
   const def: NodeDef<P, HumanTask> = {
     nodeId: cfg.name,
     executor: 'human',
-    outputKind: cfg.outputKind,
-    paramNames: Object.freeze(Object.keys(cfg.inputKinds)),
-    inputKinds: Object.freeze({ ...cfg.inputKinds }),
+    outputNodeparamslot: cfg.outputNodeparamslot,
+    paramNames: Object.freeze(Object.keys(cfg.inputNodeparamslots)),
+    inputNodeparamslots: Object.freeze({ ...cfg.inputNodeparamslots }),
     dedupe: 'hard',
     displayName: cfg.title ?? cfg.name.replaceAll('_', ' '),
     resultValidator: cfg.resultValidator,
@@ -130,7 +130,7 @@ export function defineWorkflow(cfg: WorkflowConfig): WorkflowDef {
   }
   const def: WorkflowDef = {
     workflowId: cfg.id,
-    kinds: Object.freeze([...cfg.kinds]),
+    nodeparamslots: Object.freeze([...cfg.nodeparamslots]),
     displayName: cfg.displayName ?? cfg.id.replaceAll('_', ' '),
     nodes: Object.freeze([...cfg.nodes]),
     run: cfg.run,
@@ -138,66 +138,73 @@ export function defineWorkflow(cfg: WorkflowConfig): WorkflowDef {
   return Object.freeze(def);
 }
 
-// Derived, never authored: a kind is computed iff some node in the workflow produces it; leafness
-// is a theorem over the graph. Order follows the kinds declaration.
-export function kindClasses(wd: WorkflowDef): Record<string, 'leaf' | 'computed'> {
-  const produced = new Set(wd.nodes.map((node) => node.outputKind));
+// Derived, never authored: a nodeparamslot is computed iff some node in the workflow produces it; leafness
+// is a theorem over the graph. Order follows the nodeparamslots declaration.
+export function nodeparamslotClasses(wd: WorkflowDef): Record<string, 'leaf' | 'computed'> {
+  const produced = new Set(wd.nodes.map((node) => node.outputNodeparamslot));
   const out: Record<string, 'leaf' | 'computed'> = {};
-  for (const kind of wd.kinds) {
-    out[kind.kind] = produced.has(kind.kind) ? 'computed' : 'leaf';
+  for (const nodeparamslot of wd.nodeparamslots) {
+    out[nodeparamslot.nodeparamslot] = produced.has(nodeparamslot.nodeparamslot) ? 'computed' : 'leaf';
   }
   return out;
 }
 
-type GlobalKindDecl = { workflowId: string; source: KindSource; display: string };
+type GlobalNodeparamslotDecl = { workflowId: string; source: NodeparamslotSource; display: string };
 type GlobalNodeDecl = { workflowId: string; signature: string };
 
-// One workflow's kind declarations: unique within the workflow, consistent with every other
-// workflow's declaration of the same kind (the global kinds table cannot hold two truths).
-function checkKindDeclarations(wd: WorkflowDef, globalKinds: Map<string, GlobalKindDecl>): Map<string, Kind> {
-  const declared = new Map<string, Kind>();
-  for (const k of wd.kinds) {
-    if (declared.has(k.kind)) {
-      throw new ValidationError(`${wd.workflowId}: kind '${k.kind}' declared twice`);
+// One workflow's nodeparamslot declarations: unique within the workflow, consistent with every other
+// workflow's declaration of the same nodeparamslot (the global nodeparamslots table cannot hold two truths).
+function checkNodeparamslotDeclarations(
+  wd: WorkflowDef,
+  globalNodeparamslots: Map<string, GlobalNodeparamslotDecl>
+): Map<string, Nodeparamslot> {
+  const declared = new Map<string, Nodeparamslot>();
+  for (const k of wd.nodeparamslots) {
+    if (declared.has(k.nodeparamslot)) {
+      throw new ValidationError(`${wd.workflowId}: nodeparamslot '${k.nodeparamslot}' declared twice`);
     }
-    declared.set(k.kind, k);
-    const prior = globalKinds.get(k.kind);
+    declared.set(k.nodeparamslot, k);
+    const prior = globalNodeparamslots.get(k.nodeparamslot);
     if (prior === undefined) {
-      globalKinds.set(k.kind, { workflowId: wd.workflowId, source: k.source, display: k.display ?? '' });
+      globalNodeparamslots.set(k.nodeparamslot, {
+        workflowId: wd.workflowId,
+        source: k.source,
+        display: k.display ?? '',
+      });
     } else if (prior.source !== k.source || prior.display !== (k.display ?? '')) {
       throw new ValidationError(
-        `kind '${k.kind}': ${wd.workflowId} declares source '${k.source}'/display '${k.display ?? ''}' but ${prior.workflowId} declared '${prior.source}'/'${prior.display}'`
+        `nodeparamslot '${k.nodeparamslot}': ${wd.workflowId} declares source '${k.source}'/display '${k.display ?? ''}' but ${prior.workflowId} declared '${prior.source}'/'${prior.display}'`
       );
     }
   }
   return declared;
 }
 
-// One node: kinds it touches must be declared; a node name shared across workflows must declare
+// One node: nodeparamslots it touches must be declared; a node name shared across workflows must declare
 // the same shape — the mechanical remnant of the dead code-hash tripwire.
 function checkNode(
   wd: WorkflowDef,
   nd: NodeDef,
-  declared: Map<string, Kind>,
+  declared: Map<string, Nodeparamslot>,
   globalNodes: Map<string, GlobalNodeDecl>
 ): void {
-  if (!declared.has(nd.outputKind)) {
+  if (!declared.has(nd.outputNodeparamslot)) {
     throw new ValidationError(
-      `${wd.workflowId}/${nd.nodeId}: output kind '${nd.outputKind}' is not declared by the workflow`
+      `${wd.workflowId}/${nd.nodeId}: output nodeparamslot '${nd.outputNodeparamslot}' is not declared by the workflow`
     );
   }
-  for (const [param, kind] of Object.entries(nd.inputKinds)) {
-    if (kind !== null && !declared.has(kind)) {
+  for (const [param, nodeparamslot] of Object.entries(nd.inputNodeparamslots)) {
+    if (nodeparamslot !== null && !declared.has(nodeparamslot)) {
       throw new ValidationError(
-        `${wd.workflowId}/${nd.nodeId}: param '${param}' consumes kind '${kind}' which is not declared by the workflow`
+        `${wd.workflowId}/${nd.nodeId}: param '${param}' consumes nodeparamslot '${nodeparamslot}' which is not declared by the workflow`
       );
     }
   }
   const signature = JSON.stringify({
     executor: nd.executor,
-    outputKind: nd.outputKind,
+    outputNodeparamslot: nd.outputNodeparamslot,
     paramNames: nd.paramNames,
-    inputKinds: nd.inputKinds,
+    inputNodeparamslots: nd.inputNodeparamslots,
     displayName: nd.displayName,
   });
   const prior = globalNodes.get(nd.nodeId);
@@ -210,22 +217,22 @@ function checkNode(
   }
 }
 
-// Authored source vs derived class: a produced kind must be authored computed; an unproduced
-// computed kind must be declared intake (another workflow's output attached as input).
-function reconcileKindClasses(wd: WorkflowDef, declared: Map<string, Kind>): void {
-  for (const [kind, cls] of Object.entries(kindClasses(wd))) {
-    const decl = declared.get(kind);
+// Authored source vs derived class: a produced nodeparamslot must be authored computed; an unproduced
+// computed nodeparamslot must be declared intake (another workflow's output attached as input).
+function reconcileNodeparamslotClasses(wd: WorkflowDef, declared: Map<string, Nodeparamslot>): void {
+  for (const [nodeparamslot, cls] of Object.entries(nodeparamslotClasses(wd))) {
+    const decl = declared.get(nodeparamslot);
     if (decl === undefined) {
       continue;
     }
     if (cls === 'computed' && decl.source !== 'computed') {
       throw new ValidationError(
-        `${wd.workflowId}: kind '${kind}' is produced by a node but declared with leaf source '${decl.source}'`
+        `${wd.workflowId}: nodeparamslot '${nodeparamslot}' is produced by a node but declared with leaf source '${decl.source}'`
       );
     }
     if (cls === 'leaf' && decl.source === 'computed' && decl.intake !== true) {
       throw new ValidationError(
-        `${wd.workflowId}: computed kind '${kind}' has no producing node — declare intake: true if it arrives from another workflow`
+        `${wd.workflowId}: computed nodeparamslot '${nodeparamslot}' has no producing node — declare intake: true if it arrives from another workflow`
       );
     }
   }
@@ -233,14 +240,14 @@ function reconcileKindClasses(wd: WorkflowDef, declared: Map<string, Kind>): voi
 
 // Publish hygiene: pure validation over the in-memory registry, run before any catalog write.
 export function validateCatalog(all: readonly WorkflowDef[]): void {
-  const globalKinds = new Map<string, GlobalKindDecl>();
+  const globalNodeparamslots = new Map<string, GlobalNodeparamslotDecl>();
   const globalNodes = new Map<string, GlobalNodeDecl>();
   for (const wd of all) {
-    const declared = checkKindDeclarations(wd, globalKinds);
+    const declared = checkNodeparamslotDeclarations(wd, globalNodeparamslots);
     for (const nd of wd.nodes) {
       checkNode(wd, nd, declared, globalNodes);
     }
-    reconcileKindClasses(wd, declared);
+    reconcileNodeparamslotClasses(wd, declared);
   }
 }
 

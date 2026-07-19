@@ -2,16 +2,16 @@
 // sharing contract). File name == node_id, one node per file.
 import type { ArtifactHandle } from '../../domain/artifact/ArtifactHandle.js';
 import { defineNode } from '../../domain/registry/Registry.js';
-import { SharedKind, SharedNodeId } from './enums.js';
+import { SharedNodeId, SharedNodeparamslot } from './enums.js';
 import { parseTransactionLines } from './helpers.js';
 
 export const ocrPaymentSlip = defineNode({
   name: SharedNodeId.OcrPaymentSlip,
-  outputKind: SharedKind.OcrTxns,
-  inputKinds: { slip: SharedKind.PaymentSlip },
+  outputNodeparamslot: SharedNodeparamslot.OcrTxns,
+  inputNodeparamslots: { slip: SharedNodeparamslot.PaymentSlip },
   displayName: 'OCR payment slip (mock)',
   run: async ({ slip }: { slip: ArtifactHandle }) => ({
-    doc_kind: SharedKind.PaymentSlip,
+    doc_nodeparamslot: SharedNodeparamslot.PaymentSlip,
     transactions: parseTransactionLines(await slip.text()),
   }),
 });

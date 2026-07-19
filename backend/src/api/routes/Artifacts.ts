@@ -49,8 +49,8 @@ function filenameStem(filename: string): string {
 }
 
 // Header values must be latin-1 safe; collapse anything exotic to '_'.
-function contentFilename(label: string | null, artifactId: number, mediaType: string): string {
-  const cleaned = (label ?? '').replace(/[^A-Za-z0-9._ -]+/g, '_').replace(/^[ ._]+|[ ._]+$/g, '');
+function contentFilename(displayName: string | null, artifactId: number, mediaType: string): string {
+  const cleaned = (displayName ?? '').replace(/[^A-Za-z0-9._ -]+/g, '_').replace(/^[ ._]+|[ ._]+$/g, '');
   const base = cleaned === '' ? `artifact_${artifactId}` : cleaned;
   const ext = mediaType === 'application/json' ? '.json' : '.txt';
   return base.toLowerCase().endsWith(ext) ? base : base + ext;
@@ -109,7 +109,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
       return withConn(deps, (conn) => {
         getEngagement(conn, request.params.engagement_id);
         const rows = browseArtifacts(conn, request.params.engagement_id, {
-          kind: request.query.kind ?? null,
+          nodeparamslot: request.query.nodeparamslot ?? null,
           q: request.query.q ?? null,
         });
         return rows.map(artifactMeta);
@@ -128,14 +128,14 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
       if (parts.data === null) {
         missing.push(missingField('file'));
       }
-      if (!parts.fields.has('kind')) {
-        missing.push(missingField('kind'));
+      if (!parts.fields.has('nodeparamslot')) {
+        missing.push(missingField('nodeparamslot'));
       }
       if (missing.length > 0 || parts.data === null) {
         return reply.code(422).send({ detail: missing });
       }
       const { data, mediaType } = canonicalizeIfRequested(parts, parts.data);
-      const kind = parts.fields.get('kind') ?? '';
+      const nodeparamslot = parts.fields.get('nodeparamslot') ?? '';
 
       let workflowRunId: number | null = null;
       const rawWorkflowRunId = parts.fields.get('workflow_run_id');
@@ -156,15 +156,15 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
         workflowRunId = parsed;
       }
 
-      let label = parts.fields.get('label') ?? null;
-      if ((label === null || label === '') && parts.filename !== null && parts.filename !== '') {
-        label = filenameStem(parts.filename);
+      let displayName = parts.fields.get('display_name') ?? null;
+      if ((displayName === null || displayName === '') && parts.filename !== null && parts.filename !== '') {
+        displayName = filenameStem(parts.filename);
       }
 
       const result = withConn(deps, (conn) => {
         getEngagement(conn, engagementId);
-        if (kind.trim() === '') {
-          throw new ValidationError('kind must be a non-empty string');
+        if (nodeparamslot.trim() === '') {
+          throw new ValidationError('nodeparamslot must be a non-empty string');
         }
         if (workflowRunId !== null) {
           const ws = getWorkspace(conn, workflowRunId);
@@ -172,8 +172,8 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
             throw new ValidationError(`workflow_run ${workflowRunId} belongs to a different engagement`);
           }
         }
-        const supplied = supplyArtifact(conn, deps.storageRoot, engagementId, kind.trim(), data, {
-          label,
+        const supplied = supplyArtifact(conn, deps.storageRoot, engagementId, nodeparamslot.trim(), data, {
+          displayName,
           mediaType,
           createdBy: 'user',
         });
@@ -216,7 +216,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
         return reply.code(410).send({ detail: 'payload destroyed per policy' });
       }
       const data = readPayload(deps.storageRoot, found.payloadRef);
-      const name = contentFilename(found.art.label, found.art.artifact_id, found.art.media_type);
+      const name = contentFilename(found.art.display_name, found.art.artifact_id, found.art.media_type);
       return reply
         .header('content-disposition', `attachment; filename="${name}"`)
         .type(found.art.media_type)
@@ -230,7 +230,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
     async (request): Promise<{ artifact: ArtifactMetaOut }> => {
       return withConn(deps, (conn) => {
         getArtifact(conn, request.params.artifact_id);
-        renameArtifact(conn, request.params.artifact_id, request.body.label, 'user');
+        renameArtifact(conn, request.params.artifact_id, request.body.display_name, 'user');
         return { artifact: artifactMeta(getArtifact(conn, request.params.artifact_id)) };
       });
     }

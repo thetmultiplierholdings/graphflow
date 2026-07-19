@@ -1,13 +1,13 @@
-// THE CONTRACT of tax_demo_workflow: its vocabulary (kinds and node ids — no raw string literals
+// THE CONTRACT of tax_demo_workflow: its vocabulary (nodeparamslots and node ids — no raw string literals
 // at defineNode call sites) composed from the shared vocabulary plus this version's own, and
-// KINDS — each kind with its authored birth channel and display, exactly what publish writes to
-// the kinds/workflow_kinds tables. workflow.ts is the implementation.
+// NODEPARAMSLOTS — each nodeparamslot with its authored birth channel and display, exactly what publish writes to
+// the nodeparamslots/workflow_nodeparamslots tables. workflow.ts is the implementation.
 
-import type { Kind as KindDeclaration } from '../../domain/registry/Registry.js';
-import { SHARED_KINDS, SharedKind, SharedNodeId } from '../nodes_shared/enums.js';
+import type { Nodeparamslot as NodeparamslotDeclaration } from '../../domain/registry/Registry.js';
+import { SHARED_NODEPARAMSLOTS, SharedNodeId, SharedNodeparamslot } from '../nodes_shared/enums.js';
 
-export const Kind = {
-  ...SharedKind,
+export const Nodeparamslot = {
+  ...SharedNodeparamslot,
   TaxCalc: 'tax_calc',
   FinalReport: 'final_report',
 } as const;
@@ -18,8 +18,8 @@ export const NodeId = {
   BuildReport: 'build_report',
 } as const;
 
-export const KINDS: readonly KindDeclaration[] = [
-  ...SHARED_KINDS,
-  { kind: Kind.TaxCalc, source: 'computed' },
-  { kind: Kind.FinalReport, source: 'computed' },
+export const NODEPARAMSLOTS: readonly NodeparamslotDeclaration[] = [
+  ...SHARED_NODEPARAMSLOTS,
+  { nodeparamslot: Nodeparamslot.TaxCalc, source: 'computed' },
+  { nodeparamslot: Nodeparamslot.FinalReport, source: 'computed' },
 ];

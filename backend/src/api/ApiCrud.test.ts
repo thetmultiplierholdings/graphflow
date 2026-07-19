@@ -96,20 +96,20 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
 
   // ---------- helpers ----------
 
-  async function createEngagement(label: string): Promise<EngagementOut> {
-    const res = await app.inject({ method: 'POST', url: '/engagements', payload: { label } });
+  async function createEngagement(displayName: string): Promise<EngagementOut> {
+    const res = await app.inject({ method: 'POST', url: '/engagements', payload: { display_name: displayName } });
     expect(res.statusCode).toBe(200);
     return res.json<EngagementOut>();
   }
 
   async function createWorkspace(
     engagementId: number,
-    label: string,
+    displayName: string,
     opts: { workflowId?: string; copyFrom?: number } = {}
   ): Promise<WorkspaceDetailOut> {
-    const payload: { workflow_id: string; label: string; copy_from?: number } = {
+    const payload: { workflow_id: string; display_name: string; copy_from?: number } = {
       workflow_id: opts.workflowId ?? 'tax_demo_workflow',
-      label,
+      display_name: displayName,
     };
     if (opts.copyFrom !== undefined) {
       payload.copy_from = opts.copyFrom;
@@ -143,17 +143,23 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
   }
 
   interface UploadOpts {
-    label?: string;
+    displayName?: string;
     workflowRunId?: number;
     mediaType?: string;
     canonicalJson?: boolean;
   }
 
   // Raw variant for tests asserting rejections; `upload` wraps it with the happy-path 200 check.
-  async function uploadRaw(engagementId: number, name: string, data: Buffer, kind: string, opts: UploadOpts = {}) {
-    const fields: Record<string, string> = { kind };
-    if (opts.label !== undefined) {
-      fields.label = opts.label;
+  async function uploadRaw(
+    engagementId: number,
+    name: string,
+    data: Buffer,
+    nodeparamslot: string,
+    opts: UploadOpts = {}
+  ) {
+    const fields: Record<string, string> = { nodeparamslot };
+    if (opts.displayName !== undefined) {
+      fields.display_name = opts.displayName;
     }
     if (opts.workflowRunId !== undefined) {
       fields.workflow_run_id = String(opts.workflowRunId);
@@ -174,10 +180,10 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     engagementId: number,
     name: string,
     data: Buffer,
-    kind: string,
+    nodeparamslot: string,
     opts: UploadOpts = {}
   ): Promise<UploadOut> {
-    const res = await uploadRaw(engagementId, name, data, kind, opts);
+    const res = await uploadRaw(engagementId, name, data, nodeparamslot, opts);
     expect(res.statusCode).toBe(200);
     return res.json<UploadOut>();
   }
@@ -203,14 +209,14 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
 
   it('engagement create, list, get, 404', async () => {
     const eng = await createEngagement('CRUD Co — FY 2026');
-    expect(eng.label).toBe('CRUD Co — FY 2026');
+    expect(eng.display_name).toBe('CRUD Co — FY 2026');
     expect(eng.stats).toEqual({ workspaces: 0, artifacts: 0, node_runs: 0, human_answers: 0 });
 
     const list = await app.inject({ method: 'GET', url: '/engagements' });
     expect(list.statusCode).toBe(200);
     const mine = list.json<EngagementOut[]>().filter((e) => e.engagement_id === eng.engagement_id);
     expect(mine).toHaveLength(1);
-    expect(mine[0].label).toBe('CRUD Co — FY 2026');
+    expect(mine[0].display_name).toBe('CRUD Co — FY 2026');
     expect(mine[0].stats.artifacts).toBe(0);
 
     const got = await app.inject({ method: 'GET', url: `/engagements/${eng.engagement_id}` });
@@ -222,23 +228,23 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     expect(missing.json<{ detail: string }>().detail).toContain('not found');
   });
 
-  it('upload, attach, revive and kind scoping', async () => {
+  it('upload, attach, revive and nodeparamslot scoping', async () => {
     const eng = await createEngagement('upload-eng');
     const ws = await createWorkspace(eng.engagement_id, 'ws-upload');
     const data = Buffer.from('STATEMENT - JAN\n2026-01-05 | DIVIDEND | 10.00\n');
 
     const up = await upload(eng.engagement_id, 's.txt', data, 'brokerage_statement', {
-      label: 'stmt jan',
+      displayName: 'stmt jan',
       workflowRunId: ws.workflow_run_id,
     });
     expect(up.revived).toBe(false);
     const art = up.artifact;
-    expect(art.kind).toBe('brokerage_statement');
-    expect(art.label).toBe('stmt jan');
+    expect(art.nodeparamslot).toBe('brokerage_statement');
+    expect(art.display_name).toBe('stmt jan');
     expect(art.byte_size).toBe(data.length);
     expect(art.created_by).toBe('user');
     expect(art.payload_available).toBe(true);
-    // Derived provenance: an uploaded leaf kind carries its birth channel.
+    // Derived provenance: an uploaded leaf nodeparamslot carries its birth channel.
     expect(art.origin).toBe('upload');
     expect(art.produced_by_node_run).toBeNull();
     // ArtifactMeta never carries bytes.
@@ -304,7 +310,7 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
       workflowRunId: src.workflow_run_id,
     });
     const engineArt = await upload(eng.engagement_id, 'res.txt', Buffer.from('ENGINE RESULT'), 'ocr_txns');
-    // Hand-staging a computed kind is a legal supply species: origin derives to 'override'.
+    // Hand-staging a computed nodeparamslot is a legal supply species: origin derives to 'override'.
     expect(engineArt.artifact.origin).toBe('override');
     engineAttach(src.workflow_run_id, engineArt.artifact.artifact_id);
     expect(await members(src.workflow_run_id)).toHaveLength(2);
@@ -324,11 +330,11 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     const patched = await app.inject({
       method: 'PATCH',
       url: `/artifacts/${up.artifact.artifact_id}`,
-      payload: { label: 'renamed label' },
+      payload: { display_name: 'renamed display name' },
     });
     expect(patched.statusCode).toBe(200);
     const renamed = patched.json<{ artifact: ArtifactMetaOut }>().artifact;
-    expect(renamed.label).toBe('renamed label');
+    expect(renamed.display_name).toBe('renamed display name');
     // A rename is a stamped update; creation provenance stays put.
     expect(renamed.updated_by).toBe('user');
     expect(renamed.updated_at).toMatch(ISO_RE);
@@ -343,10 +349,10 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     const wsPatch = await app.inject({
       method: 'PATCH',
       url: `/workflow-runs/${ws.workflow_run_id}`,
-      payload: { label: 'after', workflow_id: 'tax_demo_workflow_v2' },
+      payload: { display_name: 'after', workflow_id: 'tax_demo_workflow_v2' },
     });
     expect(wsPatch.statusCode).toBe(200);
-    expect(wsPatch.json<WorkspaceDetailOut>().label).toBe('after');
+    expect(wsPatch.json<WorkspaceDetailOut>().display_name).toBe('after');
     expect(wsPatch.json<WorkspaceDetailOut>().workflow_id).toBe('tax_demo_workflow_v2');
     expect(wsPatch.json<WorkspaceDetailOut>().updated_by).toBe('user');
     expect(wsPatch.json<WorkspaceDetailOut>().updated_at).toMatch(ISO_RE);
@@ -500,9 +506,9 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
       expect(node).not.toHaveProperty('code_hash');
     }
 
-    // Kinds carry the authored source; leaf stays derived (no producer among the workflow's nodes);
+    // Nodeparamslots carry the authored source; leaf stays derived (no producer among the workflow's nodes);
     // order is declaration order (the mirrors are rewritten per publish).
-    expect(v2.kinds.map((k) => k.kind)).toEqual([
+    expect(v2.nodeparamslots.map((k) => k.nodeparamslot)).toEqual([
       'brokerage_statement',
       'payment_slip',
       'ocr_txns',
@@ -512,33 +518,33 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
       'tax_calc',
       'final_report',
     ]);
-    const kindByName = new Map(v2.kinds.map((k) => [k.kind, k]));
-    expect(kindByName.get('brokerage_statement')).toMatchObject({ source: 'upload', leaf: true });
-    expect(kindByName.get('residency_answers')).toMatchObject({
+    const nodeparamslotByName = new Map(v2.nodeparamslots.map((k) => [k.nodeparamslot, k]));
+    expect(nodeparamslotByName.get('brokerage_statement')).toMatchObject({ source: 'upload', leaf: true });
+    expect(nodeparamslotByName.get('residency_answers')).toMatchObject({
       source: 'questionnaire',
       leaf: true,
       display_name: 'Residency questionnaire',
     });
-    expect(kindByName.get('ocr_txns')).toMatchObject({ source: 'computed', leaf: false });
-    // Kinds declared without a display fall back to the kind string — never an empty badge.
-    expect(kindByName.get('ocr_txns')?.display_name).toBe('ocr_txns');
-    expect(v1.kinds.map((k) => k.kind)).not.toContain('residency_answers');
+    expect(nodeparamslotByName.get('ocr_txns')).toMatchObject({ source: 'computed', leaf: false });
+    // Nodeparamslots declared without a display fall back to the nodeparamslot string — never an empty badge.
+    expect(nodeparamslotByName.get('ocr_txns')?.display_name).toBe('ocr_txns');
+    expect(v1.nodeparamslots.map((k) => k.nodeparamslot)).not.toContain('residency_answers');
 
-    // input_kinds publishes the declared dataflow: param -> consumed kind (null = scalar).
+    // input_nodeparamslots publishes the declared dataflow: param -> consumed nodeparamslot (null = scalar).
     const nodeOf = (wf: CatalogWorkflowOut, nodeId: string) => wf.nodes.find((n) => n.node_id === nodeId);
-    expect(nodeOf(v1, 'calculate_tax')?.input_kinds).toEqual({ master: 'master_txn_list' });
-    expect(nodeOf(v2, 'calculate_tax_v2')?.input_kinds).toEqual({
+    expect(nodeOf(v1, 'calculate_tax')?.input_nodeparamslots).toEqual({ master: 'master_txn_list' });
+    expect(nodeOf(v2, 'calculate_tax_v2')?.input_nodeparamslots).toEqual({
       master: 'master_txn_list',
       residency: 'residency_answers',
     });
-    expect(nodeOf(v1, 'build_report')?.input_kinds).toEqual({
+    expect(nodeOf(v1, 'build_report')?.input_nodeparamslots).toEqual({
       statements: 'brokerage_statement',
       slips: 'payment_slip',
       master: 'master_txn_list',
       calc: 'tax_calc',
     });
-    // input_kinds keys arrive in declared param order (node_input_kinds is rewritten per publish).
-    expect(Object.keys(nodeOf(v1, 'build_report')?.input_kinds ?? {})).toEqual([
+    // input_nodeparamslots keys arrive in declared param order (node_input_nodeparamslots is rewritten per publish).
+    expect(Object.keys(nodeOf(v1, 'build_report')?.input_nodeparamslots ?? {})).toEqual([
       'statements',
       'slips',
       'master',
@@ -547,9 +553,9 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
 
     for (const wf of catalog.workflows) {
       expect(wf.display_name).toBeTruthy();
-      for (const kind of wf.kinds) {
-        expect(kind.display_name).toBeTruthy();
-        expect(['upload', 'questionnaire', 'email', 'computed']).toContain(kind.source);
+      for (const nodeparamslot of wf.nodeparamslots) {
+        expect(nodeparamslot.display_name).toBeTruthy();
+        expect(['upload', 'questionnaire', 'email', 'computed']).toContain(nodeparamslot.source);
       }
       for (const node of wf.nodes) {
         expect(['engine', 'human']).toContain(node.executor);
@@ -557,12 +563,12 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     }
   });
 
-  it('upload of a kind absent from the vocabulary is rejected', async () => {
+  it('upload of a nodeparamslot absent from the vocabulary is rejected', async () => {
     const eng = await createEngagement('guard-eng');
-    const res = await uploadRaw(eng.engagement_id, 'x.txt', Buffer.from('X'), 'never_published_kind');
+    const res = await uploadRaw(eng.engagement_id, 'x.txt', Buffer.from('X'), 'never_published_nodeparamslot');
     expect(res.statusCode).toBe(422);
     expect(res.json<{ detail: string }>().detail).toBe(
-      "kind 'never_published_kind' is not in the published kind vocabulary"
+      "nodeparamslot 'never_published_nodeparamslot' is not in the published nodeparamslot vocabulary"
     );
   });
 
@@ -617,8 +623,8 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
         workflowId: 'tax_demo_workflow',
         nodeId: 'ocr_brokerage_statement',
         memoKey: 'a'.repeat(64),
-        outputKind: 'ocr_txns',
-        payload: Buffer.from('{"doc_kind":"brokerage_statement","transactions":[]}'),
+        outputNodeparamslot: 'ocr_txns',
+        payload: Buffer.from('{"doc_nodeparamslot":"brokerage_statement","transactions":[]}'),
         mediaType: 'application/json',
         createdBy: 'engine',
         temporalId: 'wf/run/act',
@@ -643,7 +649,7 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
   it('artifact content roundtrip and 404', async () => {
     const eng = await createEngagement('content-eng');
     const data = Buffer.from('unicode content — total 120.50\n', 'utf-8');
-    const up = await upload(eng.engagement_id, 'c.txt', data, 'brokerage_statement', { label: 'content check' });
+    const up = await upload(eng.engagement_id, 'c.txt', data, 'brokerage_statement', { displayName: 'content check' });
 
     const res = await app.inject({ method: 'GET', url: `/artifacts/${up.artifact.artifact_id}/content` });
     expect(res.statusCode).toBe(200);

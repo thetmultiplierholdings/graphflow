@@ -16,7 +16,7 @@ export interface RunInput {
   engagement_id: number;
   workflow_run_id: number;
   workflow_id: string;
-  declared_kinds: string[];
+  declared_nodeparamslots: string[];
   attachments: ArtifactRef[];
 }
 
@@ -109,7 +109,7 @@ function encodeArgs(value: NodeArgValue): EncodedArgs {
 }
 
 // Collect every ArtifactHandle inside an argument value — single handles, arrays, and nested
-// containers — so the inputKinds check cannot be smuggled past by wrapping.
+// containers — so the inputNodeparamslots check cannot be smuggled past by wrapping.
 function collectHandles(value: NodeArgValue, out: ArtifactHandle[]): void {
   if (value instanceof ArtifactHandle) {
     out.push(value);
@@ -128,27 +128,27 @@ function collectHandles(value: NodeArgValue, out: ArtifactHandle[]): void {
   }
 }
 
-// Declared input ports, enforced before anything is hashed: a param mapped to a kind accepts only
-// artifacts of that kind (single or list); a scalar param (null) accepts no artifacts. Absent
+// Declared input ports, enforced before anything is hashed: a param mapped to a nodeparamslot accepts only
+// artifacts of that nodeparamslot (single or list); a scalar param (null) accepts no artifacts. Absent
 // params (nulled by the caller) pass vacuously. Exported for unit tests — Ctx.node's happy path
 // requires a live activity proxy, but this guard is pure.
-export function enforceInputKinds(nd: NodeDef, argMap: Record<string, NodeArgValue>): void {
+export function enforceInputNodeparamslots(nd: NodeDef, argMap: Record<string, NodeArgValue>): void {
   for (const p of nd.paramNames) {
-    const expected = nd.inputKinds[p] ?? null;
+    const expected = nd.inputNodeparamslots[p] ?? null;
     const handles: ArtifactHandle[] = [];
     collectHandles(argMap[p] ?? null, handles);
     if (expected === null) {
       if (handles.length > 0) {
         throw ApplicationFailure.nonRetryable(
-          `node ${nd.nodeId}: param '${p}' is declared scalar but received an artifact of kind '${handles[0]?.kind ?? ''}'`
+          `node ${nd.nodeId}: param '${p}' is declared scalar but received an artifact of nodeparamslot '${handles[0]?.nodeparamslot ?? ''}'`
         );
       }
       continue;
     }
     for (const h of handles) {
-      if (h.kind !== expected) {
+      if (h.nodeparamslot !== expected) {
         throw ApplicationFailure.nonRetryable(
-          `node ${nd.nodeId}: param '${p}' expects kind '${expected}' but received '${h.kind}'`
+          `node ${nd.nodeId}: param '${p}' expects nodeparamslot '${expected}' but received '${h.nodeparamslot}'`
         );
       }
     }
@@ -180,48 +180,56 @@ export class Ctx {
     this.engagementId = inp.engagement_id;
     this.workflowRunId = inp.workflow_run_id;
     this.workflowId = inp.workflow_id;
-    this.declared = new Set(inp.declared_kinds);
+    this.declared = new Set(inp.declared_nodeparamslots);
     this.attachments = inp.attachments.map((ref) => new ArtifactHandle(ref));
     this.registry = registry;
   }
 
   // User-sourced snapshot only (invariant I7), sorted by content hash.
-  attached(kind: string): ArtifactHandle[] {
-    if (!this.declared.has(kind)) {
-      throw ApplicationFailure.nonRetryable(`kind '${kind}' is not declared by workflow '${this.workflowId}'`);
+  attached(nodeparamslot: string): ArtifactHandle[] {
+    if (!this.declared.has(nodeparamslot)) {
+      throw ApplicationFailure.nonRetryable(
+        `nodeparamslot '${nodeparamslot}' is not declared by workflow '${this.workflowId}'`
+      );
     }
-    return this.attachments.filter((h) => h.kind === kind).sort((a, b) => compareStrings(a.hash, b.hash));
+    return this.attachments
+      .filter((h) => h.nodeparamslot === nodeparamslot)
+      .sort((a, b) => compareStrings(a.hash, b.hash));
   }
 
-  attachedOne(kind: string): ArtifactHandle {
-    const items = this.attached(kind);
+  attachedOne(nodeparamslot: string): ArtifactHandle {
+    const items = this.attached(nodeparamslot);
     const first = items[0];
     if (items.length !== 1 || first === undefined) {
-      throw ApplicationFailure.nonRetryable(`expected exactly one '${kind}' attachment, found ${items.length}`);
+      throw ApplicationFailure.nonRetryable(
+        `expected exactly one '${nodeparamslot}' attachment, found ${items.length}`
+      );
     }
     return first;
   }
 
-  attachedOneOrNone(kind: string): ArtifactHandle | null {
-    const items = this.attached(kind);
+  attachedOneOrNone(nodeparamslot: string): ArtifactHandle | null {
+    const items = this.attached(nodeparamslot);
     if (items.length > 1) {
-      throw ApplicationFailure.nonRetryable(`expected at most one '${kind}' attachment, found ${items.length}`);
+      throw ApplicationFailure.nonRetryable(
+        `expected at most one '${nodeparamslot}' attachment, found ${items.length}`
+      );
     }
     const first = items[0];
     return first === undefined ? null : first;
   }
 
   // Both spellings are public workflow-author API; the aliases delegate so overriding attached* covers both.
-  userSupplied(kind: string): ArtifactHandle[] {
-    return this.attached(kind);
+  userSupplied(nodeparamslot: string): ArtifactHandle[] {
+    return this.attached(nodeparamslot);
   }
 
-  userSuppliedOne(kind: string): ArtifactHandle {
-    return this.attachedOne(kind);
+  userSuppliedOne(nodeparamslot: string): ArtifactHandle {
+    return this.attachedOne(nodeparamslot);
   }
 
-  userSuppliedOneOrNone(kind: string): ArtifactHandle | null {
-    return this.attachedOneOrNone(kind);
+  userSuppliedOneOrNone(nodeparamslot: string): ArtifactHandle | null {
+    return this.attachedOneOrNone(nodeparamslot);
   }
 
   // THE walk: input_hash over the canonical argument map, memo_key = H(node_id ':' input_hash),
@@ -250,7 +258,7 @@ export class Ctx {
         argMap[p] = null;
       }
     }
-    enforceInputKinds(nd, argMap);
+    enforceInputNodeparamslots(nd, argMap);
     const { hashForm, transport, inputArtifactIds } = encodeArgs(argMap);
     const mk = memoKey(nd.nodeId, hashValue(hashForm));
 

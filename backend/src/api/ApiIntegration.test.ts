@@ -349,11 +349,11 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
     async function uploadDoc(
       eng: number,
       docPath: string,
-      kind: string,
+      nodeparamslot: string,
       workflowRunId: number
     ): Promise<ArtifactMetaOut> {
       const form = new FormData();
-      form.append('kind', kind);
+      form.append('nodeparamslot', nodeparamslot);
       form.append('workflow_run_id', String(workflowRunId));
       form.append('file', new Blob([new Uint8Array(readFileSync(docPath))], { type: 'text/plain' }), basename(docPath));
       const res = await fetch(`${baseUrl}/engagements/${eng}/artifacts`, { method: 'POST', body: form });
@@ -460,13 +460,13 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
 
     it('full story over real Temporal', { timeout: 600_000 }, async () => {
       // 1. engagement + workspace + 1 brokerage statement + 1 payment slip
-      const engRes = await postJson('/engagements', { label: 'vitest — API integration' });
+      const engRes = await postJson('/engagements', { display_name: 'vitest — API integration' });
       await expectStatus(engRes, 200);
       const eng = (await readJson<EngagementOut>(engRes)).engagement_id;
 
       const wsRes = await postJson(`/engagements/${eng}/workflow-runs`, {
         workflow_id: 'tax_demo_workflow',
-        label: 'March estimate',
+        display_name: 'March estimate',
       });
       await expectStatus(wsRes, 200);
       const ws = (await readJson<WorkspaceDetailOut>(wsRes)).workflow_run_id;
@@ -485,7 +485,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       for (const t of tasks) {
         expect(t.engagement_id).toBe(eng);
         expect(t.node_id).toBe('verify_txns');
-        expect(t.output_kind).toBe('verified_txns');
+        expect(t.output_nodeparamslot).toBe('verified_txns');
         expect(t.result_required_keys).toEqual(['approved', 'transactions']);
         expect(OcrPayloadSchema.safeParse(t.payload).success).toBe(true);
         expect(t.instructions).toBeTruthy();
@@ -522,7 +522,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       // 4. approve both properly (OCR content fetched via the API)
       for (const t of tasks) {
         const answer = await approveTask(t);
-        expect(answer.kind).toBe('verified_txns');
+        expect(answer.nodeparamslot).toBe('verified_txns');
         // The API wraps the submitted bare name as a 'user:*' principal.
         expect(answer.created_by).toBe('user:Test Reviewer');
       }
@@ -539,7 +539,9 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
 
       const detailRes = await fetch(`${baseUrl}/workflow-runs/${ws}`);
       await expectStatus(detailRes, 200);
-      const reports = (await readJson<WorkspaceDetailOut>(detailRes)).members.filter((m) => m.kind === 'final_report');
+      const reports = (await readJson<WorkspaceDetailOut>(detailRes)).members.filter(
+        (m) => m.nodeparamslot === 'final_report'
+      );
       const lastReport = reports.at(-1);
       if (lastReport === undefined) {
         throw new RuntimeError('workspace members must contain the final_report');
@@ -573,7 +575,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       // 7. copy the workspace + ONE extra statement: only the marginal work runs
       const copyRes = await postJson(`/engagements/${eng}/workflow-runs`, {
         workflow_id: 'tax_demo_workflow',
-        label: 'April estimate',
+        display_name: 'April estimate',
         copy_from: ws,
       });
       await expectStatus(copyRes, 200);
@@ -617,7 +619,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       const detail2Res = await fetch(`${baseUrl}/workflow-runs/${ws2}`);
       await expectStatus(detail2Res, 200);
       const reports2 = (await readJson<WorkspaceDetailOut>(detail2Res)).members.filter(
-        (m) => m.kind === 'final_report'
+        (m) => m.nodeparamslot === 'final_report'
       );
       const lastReport2 = reports2.at(-1);
       if (lastReport2 === undefined) {

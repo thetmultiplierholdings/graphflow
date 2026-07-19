@@ -4,16 +4,16 @@
 import type { ArtifactHandle } from '../../../domain/artifact/ArtifactHandle.js';
 import { defineNode } from '../../../domain/registry/Registry.js';
 import type { Txn } from '../../nodes_shared/helpers.js';
-import { Kind, NodeId } from '../enums.js';
+import { NodeId, Nodeparamslot } from '../enums.js';
 
 export const buildReportV2 = defineNode({
   name: NodeId.BuildReportV2,
-  outputKind: Kind.FinalReport,
-  inputKinds: {
-    statements: Kind.BrokerageStatement,
-    slips: Kind.PaymentSlip,
-    master: Kind.MasterTxnList,
-    calc: Kind.TaxCalc,
+  outputNodeparamslot: Nodeparamslot.FinalReport,
+  inputNodeparamslots: {
+    statements: Nodeparamslot.BrokerageStatement,
+    slips: Nodeparamslot.PaymentSlip,
+    master: Nodeparamslot.MasterTxnList,
+    calc: Nodeparamslot.TaxCalc,
   },
   displayName: 'Combine documents into single report',
   run: async ({
@@ -29,7 +29,7 @@ export const buildReportV2 = defineNode({
   }) => {
     // One 'PDF' (a text file): every source document as a page, then a final page with the
     // summation calculations. Page headers come from the first line of each document's
-    // bytes—never from mutable labels.
+    // bytes—never from mutable display names.
     const firstLine = (text: string): string => text.split('\n')[0];
     const texts = await Promise.all([...statements, ...slips].map((doc) => doc.text()));
     texts.sort((a, b) => (firstLine(a) < firstLine(b) ? -1 : firstLine(a) > firstLine(b) ? 1 : 0));

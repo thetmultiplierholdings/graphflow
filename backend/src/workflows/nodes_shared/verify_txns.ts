@@ -5,7 +5,7 @@ import type { ArtifactHandle } from '../../domain/artifact/ArtifactHandle.js';
 import type { JsonValue } from '../../domain/json/JsonValue.js';
 import { defineHumanNode, type HumanTask } from '../../domain/registry/Registry.js';
 import { ValidationError } from '../../shared/errors/Errors.js';
-import { SharedKind, SharedNodeId } from './enums.js';
+import { SharedNodeId, SharedNodeparamslot } from './enums.js';
 
 const VERIFIED_TXNS_SCHEMA = ['approved', 'transactions'];
 const DECIMAL_RE = /^-?(\d+(\.\d*)?|\.\d+)$/;
@@ -65,8 +65,8 @@ export function validateVerifiedTxns(result: Record<string, JsonValue>): void {
 
 export const verifyTxns = defineHumanNode({
   name: SharedNodeId.VerifyTxns,
-  outputKind: SharedKind.VerifiedTxns,
-  inputKinds: { ocr: SharedKind.OcrTxns },
+  outputNodeparamslot: SharedNodeparamslot.VerifiedTxns,
+  inputNodeparamslots: { ocr: SharedNodeparamslot.OcrTxns },
   title: 'Verify OCR extraction',
   resultValidator: validateVerifiedTxns,
   run: ({ ocr }: { ocr: ArtifactHandle }): HumanTask => ({

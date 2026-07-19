@@ -20,12 +20,12 @@ export class ArtifactHandle {
     return this.ref.hash;
   }
 
-  get kind(): string {
-    return this.ref.kind;
+  get nodeparamslot(): string {
+    return this.ref.nodeparamslot;
   }
 
-  get label(): string {
-    return this.ref.label ?? '';
+  get displayName(): string {
+    return this.ref.display_name ?? '';
   }
 
   get mediaType(): string {

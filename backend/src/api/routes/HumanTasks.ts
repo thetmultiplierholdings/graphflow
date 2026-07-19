@@ -29,7 +29,7 @@ export function registerHumanTaskRoutes(app: FastifyInstance, deps: ApiDeps): vo
         engagement_id: info.engagement_id,
         workflow_id: info.workflow_id,
         node_id: info.node_id,
-        output_kind: info.output_kind,
+        output_nodeparamslot: info.output_nodeparamslot,
         display_name: info.display_name,
         instructions: info.instructions,
         payload: info.payload,

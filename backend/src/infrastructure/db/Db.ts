@@ -8,14 +8,14 @@ import { readPayload, writePayload } from '../storage/Storage.js';
 
 // SQLite ledger + workspace + catalog mirror.
 //   - ON CONFLICT DO NOTHING powers the idempotent completion transaction (convergence: identical
-//     bytes under one kind land on one row);
+//     bytes under one nodeparamslot land on one row);
 //   - artifact provenance is DERIVED, never stored: the artifact_facts view computes the producer
 //     (earliest node_run whose output_artifact_id points at the row) and the origin class from
-//     the kind's authored source — nothing stored can diverge from lineage.
+//     the nodeparamslot's authored source — nothing stored can diverge from lineage.
 // LEDGER (artifacts, node_runs, node_run_inputs) is insert-only; the mutable ledger columns are
-// artifacts.label and its updated_by/updated_at stamps. WORKSPACE rows are editable; detaching a
+// artifacts.display_name and its updated_by/updated_at stamps. WORKSPACE rows are editable; detaching a
 // workflow_run_artifacts row is the only user-facing DELETE (the publish transaction rewriting the
-// workflow_kinds/node_input_kinds mirrors is the only other).
+// workflow_nodeparamslots/node_input_nodeparamslots mirrors is the only other).
 //
 // Hygiene block conventions (tiered per table — schema.dbml carries the full rationale):
 //   - created_by/created_at NOT NULL where present; convergence (ON CONFLICT DO NOTHING) keeps the
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CREATE TABLE IF NOT EXISTS engagements (
   engagement_id INTEGER PRIMARY KEY,
-  label TEXT NOT NULL,
+  display_name TEXT NOT NULL,
   created_by TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_by TEXT,
@@ -52,36 +52,36 @@ CREATE TABLE IF NOT EXISTS workflows (
   updated_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS kinds (
-  kind TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS nodeparamslots (
+  nodeparamslot TEXT PRIMARY KEY,
   source TEXT NOT NULL CHECK (source IN ('upload','questionnaire','email','computed')),
   display_name TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS workflow_kinds (
+CREATE TABLE IF NOT EXISTS workflow_nodeparamslots (
   workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id),
-  kind TEXT NOT NULL REFERENCES kinds(kind),
-  PRIMARY KEY (workflow_id, kind)
+  nodeparamslot TEXT NOT NULL REFERENCES nodeparamslots(nodeparamslot),
+  PRIMARY KEY (workflow_id, nodeparamslot)
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
   workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id),
   node_id TEXT NOT NULL,
   executor TEXT NOT NULL CHECK (executor IN ('engine','human')),
-  output_kind TEXT NOT NULL REFERENCES kinds(kind),
+  output_nodeparamslot TEXT NOT NULL REFERENCES nodeparamslots(nodeparamslot),
   display_name TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT,
   PRIMARY KEY (workflow_id, node_id)
 );
 
-CREATE TABLE IF NOT EXISTS node_input_kinds (
+CREATE TABLE IF NOT EXISTS node_input_nodeparamslots (
   workflow_id TEXT NOT NULL,
   node_id TEXT NOT NULL,
   param TEXT NOT NULL,
-  kind TEXT REFERENCES kinds(kind),
+  nodeparamslot TEXT REFERENCES nodeparamslots(nodeparamslot),
   PRIMARY KEY (workflow_id, node_id, param),
   FOREIGN KEY (workflow_id, node_id) REFERENCES nodes(workflow_id, node_id)
 );
@@ -90,8 +90,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   artifact_id INTEGER PRIMARY KEY,
   engagement_id INTEGER NOT NULL REFERENCES engagements(engagement_id),
   hash TEXT NOT NULL,
-  kind TEXT NOT NULL REFERENCES kinds(kind),
-  label TEXT,
+  nodeparamslot TEXT NOT NULL REFERENCES nodeparamslots(nodeparamslot),
+  display_name TEXT,
   media_type TEXT NOT NULL,
   byte_size INTEGER NOT NULL,
   payload_ref TEXT,
@@ -100,9 +100,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
   updated_by TEXT,
   updated_at TEXT,
   deleted_at TEXT,
-  UNIQUE (engagement_id, kind, hash)
+  UNIQUE (engagement_id, nodeparamslot, hash)
 );
-CREATE INDEX IF NOT EXISTS idx_browse ON artifacts (engagement_id, kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_browse ON artifacts (engagement_id, nodeparamslot, created_at);
 
 CREATE TABLE IF NOT EXISTS node_runs (
   node_run_id INTEGER PRIMARY KEY,
@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   workflow_run_id INTEGER PRIMARY KEY,
   engagement_id INTEGER NOT NULL REFERENCES engagements(engagement_id),
   workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id),
-  label TEXT NOT NULL,
+  display_name TEXT NOT NULL,
   copied_from_workflow_run INTEGER REFERENCES workflow_runs(workflow_run_id),
   archived_at TEXT,
   created_by TEXT NOT NULL,
@@ -155,7 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_impact ON workflow_run_artifacts (artifact_id);
 
 -- READ MODEL: derived provenance. produced_by_node_run = earliest run whose output points here
 -- (several runs can converge on one artifact via ON CONFLICT DO NOTHING); origin = 'produced'
--- when such a run exists, else 'override' for a hand-supplied computed kind, else the kind's
+-- when such a run exists, else 'override' for a hand-supplied computed nodeparamslot, else the nodeparamslot's
 -- authored birth channel. Writers stay on base tables.
 CREATE VIEW IF NOT EXISTS artifact_facts AS
 SELECT
@@ -168,12 +168,12 @@ SELECT
     WHEN k.source = 'computed' THEN 'override'
     ELSE k.source
   END AS origin
-FROM artifacts a JOIN kinds k ON k.kind = a.kind;
+FROM artifacts a JOIN nodeparamslots k ON k.nodeparamslot = a.nodeparamslot;
 `;
 
 export interface EngagementRow {
   engagement_id: number;
-  label: string;
+  display_name: string;
   created_by: string;
   created_at: string;
   updated_by: string | null;
@@ -185,8 +185,8 @@ export interface ArtifactRow {
   artifact_id: number;
   engagement_id: number;
   hash: string;
-  kind: string;
-  label: string | null;
+  nodeparamslot: string;
+  display_name: string | null;
   media_type: string;
   byte_size: number;
   payload_ref: string | null;
@@ -198,8 +198,8 @@ export interface ArtifactRow {
 }
 
 // How the artifact came to exist — derived by the artifact_facts view, never stored. 'produced'
-// wins over everything (a producing run exists); 'override' is a hand-supplied computed kind;
-// the rest are the kind's authored birth channel.
+// wins over everything (a producing run exists); 'override' is a hand-supplied computed nodeparamslot;
+// the rest are the nodeparamslot's authored birth channel.
 export type ArtifactOrigin = 'produced' | 'upload' | 'questionnaire' | 'email' | 'override';
 
 // A row of the artifact_facts view: the base artifact columns plus derived provenance.
@@ -212,7 +212,7 @@ export interface WorkflowRunRow {
   workflow_run_id: number;
   engagement_id: number;
   workflow_id: string;
-  label: string;
+  display_name: string;
   copied_from_workflow_run: number | null;
   archived_at: string | null;
   created_by: string;
@@ -258,7 +258,7 @@ export interface CompletionInput {
   workflowId: string;
   nodeId: string;
   memoKey: string;
-  outputKind: string;
+  outputNodeparamslot: string;
   payload: Uint8Array;
   mediaType: string;
   createdBy: string;
@@ -283,10 +283,10 @@ export interface ArtifactLineage {
   consumed_by: NodeRunWithInputs[];
 }
 
-export interface CatalogKindEntry {
-  kind: string;
+export interface CatalogNodeparamslotEntry {
+  nodeparamslot: string;
   source: string;
-  // Derived, not stored: 1 iff no node of the workflow produces the kind (SQLite int-as-boolean).
+  // Derived, not stored: 1 iff no node of the workflow produces the nodeparamslot (SQLite int-as-boolean).
   leaf: number;
   display_name: string;
 }
@@ -294,9 +294,9 @@ export interface CatalogKindEntry {
 export interface CatalogNodeEntry {
   node_id: string;
   executor: string;
-  output_kind: string;
+  output_nodeparamslot: string;
   display_name: string | null;
-  input_kinds: Record<string, string | null>;
+  input_nodeparamslots: Record<string, string | null>;
 }
 
 export interface CatalogWorkflow {
@@ -304,7 +304,7 @@ export interface CatalogWorkflow {
   display_name: string;
   created_at: string;
   updated_at: string | null;
-  kinds: CatalogKindEntry[];
+  nodeparamslots: CatalogNodeparamslotEntry[];
   nodes: CatalogNodeEntry[];
 }
 
@@ -315,13 +315,13 @@ export function nowIso(): string {
   return `${new Date().toISOString().slice(0, 19)}+00:00`;
 }
 
-// {kind}_DDMMYY_HHMMSS (day-month-year!) in UTC.
-export function autoLabel(kind: string): string {
+// {nodeparamslot}_DDMMYY_HHMMSS (day-month-year!) in UTC.
+export function autoDisplayName(nodeparamslot: string): string {
   const d = new Date();
   const two = (n: number): string => String(n).padStart(2, '0');
   const date = `${two(d.getUTCDate())}${two(d.getUTCMonth() + 1)}${two(d.getUTCFullYear() % 100)}`;
   const time = `${two(d.getUTCHours())}${two(d.getUTCMinutes())}${two(d.getUTCSeconds())}`;
-  return `${kind}_${date}_${time}`;
+  return `${nodeparamslot}_${date}_${time}`;
 }
 
 export function connect(dbPath: string): Database.Database {
@@ -361,8 +361,8 @@ const sha256Hex = (data: Uint8Array): string => createHash('sha256').update(data
 const toRef = (row: ArtifactRow): ArtifactRef => ({
   artifact_id: row.artifact_id,
   hash: row.hash,
-  kind: row.kind,
-  label: row.label,
+  nodeparamslot: row.nodeparamslot,
+  display_name: row.display_name,
   media_type: row.media_type,
 });
 
@@ -377,7 +377,7 @@ const MEMO_LOOKUP_SQL = `
   SELECT a.* FROM node_runs nr JOIN artifacts a ON a.artifact_id = nr.output_artifact_id
   WHERE nr.engagement_id=? AND nr.memo_key=?`;
 
-const SELECT_ARTIFACT_BY_IDENTITY_SQL = 'SELECT * FROM artifacts WHERE engagement_id=? AND kind=? AND hash=?';
+const SELECT_ARTIFACT_BY_IDENTITY_SQL = 'SELECT * FROM artifacts WHERE engagement_id=? AND nodeparamslot=? AND hash=?';
 
 const ATTACH_ENGINE_SQL = `
   INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, created_by, created_at)
@@ -396,14 +396,14 @@ const INPUTS_FOR_RUN_SQL = 'SELECT artifact_id FROM node_run_inputs WHERE node_r
 
 // ---------- catalog ----------
 
-// CI-publish the code registry into the catalog mirror. kinds/workflows/nodes are upsert-only
+// CI-publish the code registry into the catalog mirror. nodeparamslots/workflows/nodes are upsert-only
 // (retired rows persist — they are FK parents and what makes retired-workspace dispatch fail
-// loud); workflow_kinds and node_input_kinds are pure mirrors nothing FKs, rewritten
+// loud); workflow_nodeparamslots and node_input_nodeparamslots are pure mirrors nothing FKs, rewritten
 // delete-then-insert so declarations removed from code stop lingering between resets.
 // created_at is first-publish; updated_at stamps only a real change TO THE MIRRORED ROW'S OWN
 // COLUMNS (the DO UPDATE WHERE guards, IS NOT for NULL-safety) — a worker restart republishing an
 // identical registry leaves both untouched. Scope caveat: the guards compare exactly what the row
-// stores, so a workflow gaining a node, or a node changing inputKinds, moves only the
+// stores, so a workflow gaining a node, or a node changing inputNodeparamslots, moves only the
 // delete-then-insert mirrors and bumps nothing here. No actor columns: the publisher is always
 // the code registry itself.
 export function publishCatalog(conn: Database.Database, registry: Registry): string[] {
@@ -422,39 +422,41 @@ export function publishCatalog(conn: Database.Database, registry: Registry): str
           updated_at=excluded.created_at
           WHERE workflows.display_name IS NOT excluded.display_name`)
         .run(wf.workflowId, wf.displayName, publishedAt);
-      // The global kind vocabulary first — nodes.output_kind and workflow_kinds.kind FK it.
+      // The global nodeparamslot vocabulary first — nodes.output_nodeparamslot and workflow_nodeparamslots.nodeparamslot FK it.
       // validateCatalog already rejected cross-workflow source/display conflicts.
-      const kindUpsert = conn.prepare(`
-        INSERT INTO kinds (kind, source, display_name, created_at) VALUES (?,?,?,?)
-        ON CONFLICT(kind) DO UPDATE SET source=excluded.source, display_name=excluded.display_name,
+      const nodeparamslotUpsert = conn.prepare(`
+        INSERT INTO nodeparamslots (nodeparamslot, source, display_name, created_at) VALUES (?,?,?,?)
+        ON CONFLICT(nodeparamslot) DO UPDATE SET source=excluded.source, display_name=excluded.display_name,
         updated_at=excluded.created_at
-        WHERE kinds.source IS NOT excluded.source OR kinds.display_name IS NOT excluded.display_name`);
-      for (const k of wf.kinds) {
-        kindUpsert.run(k.kind, k.source, k.display ?? '', publishedAt);
+        WHERE nodeparamslots.source IS NOT excluded.source OR nodeparamslots.display_name IS NOT excluded.display_name`);
+      for (const k of wf.nodeparamslots) {
+        nodeparamslotUpsert.run(k.nodeparamslot, k.source, k.display ?? '', publishedAt);
       }
-      conn.prepare('DELETE FROM workflow_kinds WHERE workflow_id=?').run(wf.workflowId);
-      const membershipInsert = conn.prepare('INSERT INTO workflow_kinds (workflow_id, kind) VALUES (?,?)');
-      for (const k of wf.kinds) {
-        membershipInsert.run(wf.workflowId, k.kind);
+      conn.prepare('DELETE FROM workflow_nodeparamslots WHERE workflow_id=?').run(wf.workflowId);
+      const membershipInsert = conn.prepare(
+        'INSERT INTO workflow_nodeparamslots (workflow_id, nodeparamslot) VALUES (?,?)'
+      );
+      for (const k of wf.nodeparamslots) {
+        membershipInsert.run(wf.workflowId, k.nodeparamslot);
       }
       const nodeUpsert = conn.prepare(`
-        INSERT INTO nodes (workflow_id, node_id, executor, output_kind, display_name, created_at)
+        INSERT INTO nodes (workflow_id, node_id, executor, output_nodeparamslot, display_name, created_at)
         VALUES (?,?,?,?,?,?) ON CONFLICT(workflow_id, node_id) DO UPDATE SET
-        executor=excluded.executor, output_kind=excluded.output_kind,
+        executor=excluded.executor, output_nodeparamslot=excluded.output_nodeparamslot,
         display_name=excluded.display_name, updated_at=excluded.created_at
         WHERE nodes.executor IS NOT excluded.executor
-          OR nodes.output_kind IS NOT excluded.output_kind
+          OR nodes.output_nodeparamslot IS NOT excluded.output_nodeparamslot
           OR nodes.display_name IS NOT excluded.display_name`);
       for (const nd of wf.nodes) {
-        nodeUpsert.run(wf.workflowId, nd.nodeId, nd.executor, nd.outputKind, nd.displayName, publishedAt);
+        nodeUpsert.run(wf.workflowId, nd.nodeId, nd.executor, nd.outputNodeparamslot, nd.displayName, publishedAt);
       }
-      conn.prepare('DELETE FROM node_input_kinds WHERE workflow_id=?').run(wf.workflowId);
-      const inputKindInsert = conn.prepare(
-        'INSERT INTO node_input_kinds (workflow_id, node_id, param, kind) VALUES (?,?,?,?)'
+      conn.prepare('DELETE FROM node_input_nodeparamslots WHERE workflow_id=?').run(wf.workflowId);
+      const inputNodeparamslotInsert = conn.prepare(
+        'INSERT INTO node_input_nodeparamslots (workflow_id, node_id, param, nodeparamslot) VALUES (?,?,?,?)'
       );
       for (const nd of wf.nodes) {
         for (const param of nd.paramNames) {
-          inputKindInsert.run(wf.workflowId, nd.nodeId, param, nd.inputKinds[param]);
+          inputNodeparamslotInsert.run(wf.workflowId, nd.nodeId, param, nd.inputNodeparamslots[param]);
         }
       }
       published.push(`published ${wf.workflowId} (${wf.nodes.length} nodes)`);
@@ -469,14 +471,18 @@ export function publishCatalog(conn: Database.Database, registry: Registry): str
 
 // ---------- engagement space ----------
 
-export function createEngagement(conn: Database.Database, label: string, opts: { createdBy?: string } = {}): number {
+export function createEngagement(
+  conn: Database.Database,
+  displayName: string,
+  opts: { createdBy?: string } = {}
+): number {
   const createdBy = opts.createdBy ?? 'user';
   assertPrincipal(createdBy);
   conn.exec('BEGIN IMMEDIATE');
   try {
     const info = conn
-      .prepare('INSERT INTO engagements (label, created_by, created_at) VALUES (?,?,?)')
-      .run(label, createdBy, nowIso());
+      .prepare('INSERT INTO engagements (display_name, created_by, created_at) VALUES (?,?,?)')
+      .run(displayName, createdBy, nowIso());
     conn.exec('COMMIT');
     return Number(info.lastInsertRowid);
   } catch (e) {
@@ -486,24 +492,26 @@ export function createEngagement(conn: Database.Database, label: string, opts: {
 }
 
 // External supply (upload / questionnaire answers / hand-built value): the artifact enters with
-// no producing run, so its origin derives from the kind's birth channel — or 'override' when a
-// computed kind is hand-staged (a corrected intermediate is a legal supply species).
-// Re-supplying identical bytes under the same kind lands on the existing row — the revive path
+// no producing run, so its origin derives from the nodeparamslot's birth channel — or 'override' when a
+// computed nodeparamslot is hand-staged (a corrected intermediate is a legal supply species).
+// Re-supplying identical bytes under the same nodeparamslot lands on the existing row — the revive path
 // (reported via the returned 'existed' flag).
 export function supplyArtifact(
   conn: Database.Database,
   storageRoot: string,
   engagementId: number,
-  kind: string,
+  nodeparamslot: string,
   data: Uint8Array,
-  opts: { label?: string | null; mediaType?: string; createdBy?: string } = {}
+  opts: { displayName?: string | null; mediaType?: string; createdBy?: string } = {}
 ): SuppliedArtifact {
-  // Guards before the payload write: an unknown kind or a malformed principal must not leave an
-  // orphaned blob behind. Kinds absent from the published vocabulary are rejected; supplying a
-  // computed kind is legal.
-  const known = conn.prepare<[string], { kind: string }>('SELECT kind FROM kinds WHERE kind=?').get(kind);
+  // Guards before the payload write: an unknown nodeparamslot or a malformed principal must not leave an
+  // orphaned blob behind. Nodeparamslots absent from the published vocabulary are rejected; supplying a
+  // computed nodeparamslot is legal.
+  const known = conn
+    .prepare<[string], { nodeparamslot: string }>('SELECT nodeparamslot FROM nodeparamslots WHERE nodeparamslot=?')
+    .get(nodeparamslot);
   if (known === undefined) {
-    throw new ValidationError(`kind '${kind}' is not in the published kind vocabulary`);
+    throw new ValidationError(`nodeparamslot '${nodeparamslot}' is not in the published nodeparamslot vocabulary`);
   }
   const createdBy = opts.createdBy ?? 'user';
   assertPrincipal(createdBy);
@@ -513,20 +521,20 @@ export function supplyArtifact(
   try {
     const existing = conn
       .prepare<[number, string, string], { '1': number }>(
-        'SELECT 1 FROM artifacts WHERE engagement_id=? AND kind=? AND hash=?'
+        'SELECT 1 FROM artifacts WHERE engagement_id=? AND nodeparamslot=? AND hash=?'
       )
-      .get(engagementId, kind, contentHash);
+      .get(engagementId, nodeparamslot, contentHash);
     conn
       .prepare(`
-        INSERT INTO artifacts (engagement_id, hash, kind, label, media_type, byte_size,
+        INSERT INTO artifacts (engagement_id, hash, nodeparamslot, display_name, media_type, byte_size,
         payload_ref, created_by, created_at)
         VALUES (?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(engagement_id, kind, hash) DO NOTHING`)
+        ON CONFLICT(engagement_id, nodeparamslot, hash) DO NOTHING`)
       .run(
         engagementId,
         contentHash,
-        kind,
-        opts.label || autoLabel(kind),
+        nodeparamslot,
+        opts.displayName || autoDisplayName(nodeparamslot),
         opts.mediaType ?? 'text/plain',
         data.length,
         ref,
@@ -536,7 +544,7 @@ export function supplyArtifact(
     const row = requireRow(
       conn
         .prepare<[number, string, string], ArtifactRow>(SELECT_ARTIFACT_BY_IDENTITY_SQL)
-        .get(engagementId, kind, contentHash),
+        .get(engagementId, nodeparamslot, contentHash),
       'supply_artifact re-select'
     );
     conn.exec('COMMIT');
@@ -553,7 +561,7 @@ export function createWorkspace(
   conn: Database.Database,
   engagementId: number,
   workflowId: string,
-  label: string,
+  displayName: string,
   opts: { createdBy?: string; copiedFrom?: number | null } = {}
 ): number {
   const createdBy = opts.createdBy ?? 'user';
@@ -563,9 +571,9 @@ export function createWorkspace(
   try {
     const info = conn
       .prepare(`
-        INSERT INTO workflow_runs (engagement_id, workflow_id, label,
+        INSERT INTO workflow_runs (engagement_id, workflow_id, display_name,
         copied_from_workflow_run, created_by, created_at) VALUES (?,?,?,?,?,?)`)
-      .run(engagementId, workflowId, label, copiedFrom, createdBy, nowIso());
+      .run(engagementId, workflowId, displayName, copiedFrom, createdBy, nowIso());
     const wfr = Number(info.lastInsertRowid);
     if (copiedFrom !== null) {
       // Copied memberships are NEW memberships: fresh created_* under the copying actor.
@@ -607,7 +615,7 @@ export function attach(
 }
 
 // The user-facing delete — the only other DELETEs are the publish transaction rewriting the
-// workflow_kinds/node_input_kinds mirrors. The ledger keeps everything, which is why
+// workflow_nodeparamslots/node_input_nodeparamslots mirrors. The ledger keeps everything, which is why
 // reintroducing the same bytes revives prior work.
 export function detach(conn: Database.Database, workflowRunId: number, artifactId: number): void {
   conn.exec('BEGIN IMMEDIATE');
@@ -663,15 +671,20 @@ export function getArtifact(conn: Database.Database, artifactId: number): Artifa
   return row;
 }
 
-// The one content-facing mutable ledger column, stamped: label edits record their actor and time
+// The one content-facing mutable ledger column, stamped: display-name edits record their actor and time
 // in updated_by/updated_at; everything else on an artifact row stays immutable.
-export function renameArtifact(conn: Database.Database, artifactId: number, label: string, updatedBy: string): void {
+export function renameArtifact(
+  conn: Database.Database,
+  artifactId: number,
+  displayName: string,
+  updatedBy: string
+): void {
   assertPrincipal(updatedBy);
   conn.exec('BEGIN IMMEDIATE');
   try {
     conn
-      .prepare('UPDATE artifacts SET label=?, updated_by=?, updated_at=? WHERE artifact_id=?')
-      .run(label, updatedBy, nowIso(), artifactId);
+      .prepare('UPDATE artifacts SET display_name=?, updated_by=?, updated_at=? WHERE artifact_id=?')
+      .run(displayName, updatedBy, nowIso(), artifactId);
     conn.exec('COMMIT');
   } catch (e) {
     conn.exec('ROLLBACK');
@@ -719,29 +732,31 @@ export function recordCompletion(
 
     // Slow path: file the fact — the output artifact first, then the run row pointing at it
     // (plain immediate FKs; the circular pair died with the stored producer column).
-    // Kind-class assertion: runs may only produce computed kinds. A typed error here keeps
+    // Nodeparamslot-class assertion: runs may only produce computed nodeparamslots. A typed error here keeps
     // FK noise out of the constraint-race catch below.
-    const kindRow = conn
-      .prepare<[string], { source: string }>('SELECT source FROM kinds WHERE kind=?')
-      .get(input.outputKind);
-    if (kindRow === undefined) {
-      throw new RuntimeError(`output kind '${input.outputKind}' is not in the published kind vocabulary`);
-    }
-    if (kindRow.source !== 'computed') {
+    const nodeparamslotRow = conn
+      .prepare<[string], { source: string }>('SELECT source FROM nodeparamslots WHERE nodeparamslot=?')
+      .get(input.outputNodeparamslot);
+    if (nodeparamslotRow === undefined) {
       throw new RuntimeError(
-        `output kind '${input.outputKind}' is a leaf channel ('${kindRow.source}') — runs may only produce computed kinds`
+        `output nodeparamslot '${input.outputNodeparamslot}' is not in the published nodeparamslot vocabulary`
+      );
+    }
+    if (nodeparamslotRow.source !== 'computed') {
+      throw new RuntimeError(
+        `output nodeparamslot '${input.outputNodeparamslot}' is a leaf channel ('${nodeparamslotRow.source}') — runs may only produce computed nodeparamslots`
       );
     }
     conn
       .prepare(`
-        INSERT INTO artifacts (engagement_id, hash, kind, label, media_type, byte_size,
+        INSERT INTO artifacts (engagement_id, hash, nodeparamslot, display_name, media_type, byte_size,
         payload_ref, created_by, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(engagement_id, kind, hash) DO NOTHING`)
+        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(engagement_id, nodeparamslot, hash) DO NOTHING`)
       .run(
         input.engagementId,
         contentHash,
-        input.outputKind,
-        autoLabel(input.outputKind),
+        input.outputNodeparamslot,
+        autoDisplayName(input.outputNodeparamslot),
         input.mediaType,
         input.payload.length,
         ref,
@@ -751,7 +766,7 @@ export function recordCompletion(
     const out = requireRow(
       conn
         .prepare<[number, string, string], ArtifactRow>(SELECT_ARTIFACT_BY_IDENTITY_SQL)
-        .get(input.engagementId, input.outputKind, contentHash),
+        .get(input.engagementId, input.outputNodeparamslot, contentHash),
       'record_completion re-select'
     );
     const runInfo = conn
@@ -849,21 +864,21 @@ export function listWorkspaces(conn: Database.Database, engagementId: number): W
     .all(engagementId);
 }
 
-// The pool browser (idx_browse), newest first, optional kind/substring filter. Reads the
+// The pool browser (idx_browse), newest first, optional nodeparamslot/substring filter. Reads the
 // artifact_facts view — browse rows carry derived provenance onto the wire.
 export function browseArtifacts(
   conn: Database.Database,
   engagementId: number,
-  opts: { kind?: string | null; q?: string | null } = {}
+  opts: { nodeparamslot?: string | null; q?: string | null } = {}
 ): ArtifactFactsRow[] {
   let sql = 'SELECT * FROM artifact_facts WHERE engagement_id=?';
   const params: (number | string)[] = [engagementId];
-  if (opts.kind) {
-    sql += ' AND kind=?';
-    params.push(opts.kind);
+  if (opts.nodeparamslot) {
+    sql += ' AND nodeparamslot=?';
+    params.push(opts.nodeparamslot);
   }
   if (opts.q) {
-    sql += ' AND (label LIKE ? OR kind LIKE ? OR hash LIKE ?)';
+    sql += ' AND (display_name LIKE ? OR nodeparamslot LIKE ? OR hash LIKE ?)';
     const like = `%${opts.q}%`;
     params.push(like, like, like);
   }
@@ -908,11 +923,11 @@ export function artifactLineage(conn: Database.Database, artifactId: number): Ar
   };
 }
 
-// The catalog mirror: every published workflow with its kinds and nodes. workflow_kinds and
-// node_input_kinds are rewritten per publish, so their rowid order is declaration order; nodes
+// The catalog mirror: every published workflow with its nodeparamslots and nodes. workflow_nodeparamslots and
+// node_input_nodeparamslots are rewritten per publish, so their rowid order is declaration order; nodes
 // keep first-insert order across upserts. leaf is derived per workflow (no node produces the
-// kind), never stored. Known skew, accepted: nodes rows are never deleted, so a RETIRED node row
-// (renamed without a db reset) still counts as a producer here — a kind that lost its last
+// nodeparamslot), never stored. Known skew, accepted: nodes rows are never deleted, so a RETIRED node row
+// (renamed without a db reset) still counts as a producer here — a nodeparamslot that lost its last
 // current producer keeps leaf=false until the stale row is retired for real.
 export function catalogSnapshot(conn: Database.Database): CatalogWorkflow[] {
   // Explicit projection — the spread below puts exactly these columns on the snapshot, so a new
@@ -922,32 +937,35 @@ export function catalogSnapshot(conn: Database.Database): CatalogWorkflow[] {
       'SELECT workflow_id, display_name, created_at, updated_at FROM workflows ORDER BY workflow_id'
     )
     .all();
-  const kindsStmt = conn.prepare<
+  const nodeparamslotsStmt = conn.prepare<
     [string],
-    { kind: string; source: string; leaf: number; display_name: string | null }
+    { nodeparamslot: string; source: string; leaf: number; display_name: string | null }
   >(`
-    SELECT wk.kind, k.source, k.display_name,
-      NOT EXISTS (SELECT 1 FROM nodes n WHERE n.workflow_id = wk.workflow_id AND n.output_kind = wk.kind) AS leaf
-    FROM workflow_kinds wk JOIN kinds k ON k.kind = wk.kind
+    SELECT wk.nodeparamslot, k.source, k.display_name,
+      NOT EXISTS (SELECT 1 FROM nodes n WHERE n.workflow_id = wk.workflow_id AND n.output_nodeparamslot = wk.nodeparamslot) AS leaf
+    FROM workflow_nodeparamslots wk JOIN nodeparamslots k ON k.nodeparamslot = wk.nodeparamslot
     WHERE wk.workflow_id=? ORDER BY wk.rowid`);
   const nodesStmt = conn.prepare<
     [string],
-    { node_id: string; executor: string; output_kind: string; display_name: string | null }
-  >('SELECT node_id, executor, output_kind, display_name FROM nodes WHERE workflow_id=? ORDER BY rowid');
-  const inputKindsStmt = conn.prepare<[string, string], { param: string; kind: string | null }>(
-    'SELECT param, kind FROM node_input_kinds WHERE workflow_id=? AND node_id=? ORDER BY rowid'
+    { node_id: string; executor: string; output_nodeparamslot: string; display_name: string | null }
+  >('SELECT node_id, executor, output_nodeparamslot, display_name FROM nodes WHERE workflow_id=? ORDER BY rowid');
+  const inputNodeparamslotsStmt = conn.prepare<[string, string], { param: string; nodeparamslot: string | null }>(
+    'SELECT param, nodeparamslot FROM node_input_nodeparamslots WHERE workflow_id=? AND node_id=? ORDER BY rowid'
   );
   return workflows.map((wf) => ({
     ...wf,
-    // Kinds declared without a display name fall back to the kind string — the UI never renders
+    // Nodeparamslots declared without a display name fall back to the nodeparamslot string — the UI never renders
     // an empty badge.
-    kinds: kindsStmt
-      .all(wf.workflow_id)
-      .map((k) => ({ kind: k.kind, source: k.source, leaf: k.leaf, display_name: k.display_name || k.kind })),
+    nodeparamslots: nodeparamslotsStmt.all(wf.workflow_id).map((k) => ({
+      nodeparamslot: k.nodeparamslot,
+      source: k.source,
+      leaf: k.leaf,
+      display_name: k.display_name || k.nodeparamslot,
+    })),
     nodes: nodesStmt.all(wf.workflow_id).map((n) => ({
       ...n,
-      input_kinds: Object.fromEntries(
-        inputKindsStmt.all(wf.workflow_id, n.node_id).map((row) => [row.param, row.kind])
+      input_nodeparamslots: Object.fromEntries(
+        inputNodeparamslotsStmt.all(wf.workflow_id, n.node_id).map((row) => [row.param, row.nodeparamslot])
       ),
     })),
   }));

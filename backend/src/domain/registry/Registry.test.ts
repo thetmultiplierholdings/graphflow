@@ -7,9 +7,9 @@ import {
   defineNode,
   defineWorkflow,
   type HumanTask,
-  type Kind,
-  kindClasses,
   type NodeDef,
+  type Nodeparamslot,
+  nodeparamslotClasses,
   validateCatalog,
   type WorkflowDef,
 } from './Registry.js';
@@ -20,19 +20,19 @@ const parseLines = (text: string): string[] => text.split('\n');
 
 const ocrStatement = defineNode({
   name: 'ocr_brokerage_statement',
-  outputKind: 'ocr_txns',
-  inputKinds: { statement: 'brokerage_statement' },
+  outputNodeparamslot: 'ocr_txns',
+  inputNodeparamslots: { statement: 'brokerage_statement' },
   displayName: 'OCR brokerage statement (mock)',
   run: async ({ statement }: { statement: ArtifactHandle }) => ({
-    doc_kind: 'brokerage_statement',
+    doc_nodeparamslot: 'brokerage_statement',
     lines: parseLines(await statement.text()),
   }),
 });
 
 const verifyTxns = defineHumanNode({
   name: 'verify_txns',
-  outputKind: 'verified_txns',
-  inputKinds: { ocr: 'ocr_txns' },
+  outputNodeparamslot: 'verified_txns',
+  inputNodeparamslots: { ocr: 'ocr_txns' },
   title: 'Verify OCR extraction',
   resultValidator: (result) => {
     if (result.approved !== true) {
@@ -48,22 +48,26 @@ const verifyTxns = defineHumanNode({
 
 const appendToMaster = defineNode({
   name: 'append_to_master_list',
-  outputKind: 'master_txn_list',
-  inputKinds: {},
+  outputNodeparamslot: 'master_txn_list',
+  inputNodeparamslots: {},
   run: () => ({ transactions: [] }),
 });
 
-const DEFAULT_KINDS: readonly Kind[] = [
-  { kind: 'brokerage_statement', source: 'upload', display: 'Brokerage statement (PDF)' },
-  { kind: 'ocr_txns', source: 'computed' },
-  { kind: 'verified_txns', source: 'computed' },
-  { kind: 'master_txn_list', source: 'computed' },
+const DEFAULT_NODEPARAMSLOTS: readonly Nodeparamslot[] = [
+  { nodeparamslot: 'brokerage_statement', source: 'upload', display: 'Brokerage statement (PDF)' },
+  { nodeparamslot: 'ocr_txns', source: 'computed' },
+  { nodeparamslot: 'verified_txns', source: 'computed' },
+  { nodeparamslot: 'master_txn_list', source: 'computed' },
 ];
 
-const makeWorkflow = (id: string, nodes: readonly NodeDef[], kinds: readonly Kind[] = DEFAULT_KINDS): WorkflowDef =>
+const makeWorkflow = (
+  id: string,
+  nodes: readonly NodeDef[],
+  nodeparamslots: readonly Nodeparamslot[] = DEFAULT_NODEPARAMSLOTS
+): WorkflowDef =>
   defineWorkflow({
     id,
-    kinds,
+    nodeparamslots,
     nodes,
     run: async () => undefined,
   });
@@ -82,46 +86,46 @@ describe('defineNode', () => {
   it('keeps explicit config values', () => {
     const hard = defineNode({
       name: 'calc_tax',
-      outputKind: 'tax_calc',
-      inputKinds: { master: 'master_txn_list' },
+      outputNodeparamslot: 'tax_calc',
+      inputNodeparamslots: { master: 'master_txn_list' },
       dedupe: 'hard',
       run: ({ master }: { master: ArtifactHandle }) => ({ hash: master.hash }),
     });
     expect(hard.dedupe).toBe('hard');
     expect(ocrStatement.displayName).toBe('OCR brokerage statement (mock)');
     expect(ocrStatement.paramNames).toEqual(['statement']);
-    expect(ocrStatement.inputKinds).toEqual({ statement: 'brokerage_statement' });
+    expect(ocrStatement.inputNodeparamslots).toEqual({ statement: 'brokerage_statement' });
   });
 
-  it('accepts null-for-scalar in inputKinds', () => {
+  it('accepts null-for-scalar in inputNodeparamslots', () => {
     const withScalar = defineNode({
       name: 'threshold_check',
-      outputKind: 'tax_calc',
-      inputKinds: { master: 'master_txn_list', threshold: null },
+      outputNodeparamslot: 'tax_calc',
+      inputNodeparamslots: { master: 'master_txn_list', threshold: null },
       run: ({ master }: { master: ArtifactHandle; threshold: string }) => ({ hash: master.hash }),
     });
-    expect(withScalar.inputKinds).toEqual({ master: 'master_txn_list', threshold: null });
+    expect(withScalar.inputNodeparamslots).toEqual({ master: 'master_txn_list', threshold: null });
   });
 
-  it('derives paramNames from inputKinds in declaration order — inputKinds IS the param declaration', () => {
+  it('derives paramNames from inputNodeparamslots in declaration order — inputNodeparamslots IS the param declaration', () => {
     const node = defineNode({
       name: 'ordered',
-      outputKind: 'tax_calc',
-      inputKinds: { second: 'master_txn_list', first: null, third: 'ocr_txns' },
+      outputNodeparamslot: 'tax_calc',
+      inputNodeparamslots: { second: 'master_txn_list', first: null, third: 'ocr_txns' },
       run: ({ second }: { second: ArtifactHandle; first: string | null; third: ArtifactHandle }) => ({
         hash: second.hash,
       }),
     });
     expect(node.paramNames).toEqual(['second', 'first', 'third']);
-    expect(node.paramNames).toEqual(Object.keys(node.inputKinds));
+    expect(node.paramNames).toEqual(Object.keys(node.inputNodeparamslots));
   });
 
   it('returns frozen definitions that reject mutation in strict mode', () => {
     expect(Object.isFrozen(ocrStatement)).toBe(true);
     expect(Object.isFrozen(ocrStatement.paramNames)).toBe(true);
-    expect(Object.isFrozen(ocrStatement.inputKinds)).toBe(true);
+    expect(Object.isFrozen(ocrStatement.inputNodeparamslots)).toBe(true);
     expect(() => {
-      (ocrStatement as unknown as { outputKind: string }).outputKind = 'mutated';
+      (ocrStatement as unknown as { outputNodeparamslot: string }).outputNodeparamslot = 'mutated';
     }).toThrow(TypeError);
   });
 });
@@ -136,8 +140,8 @@ describe('defineHumanNode', () => {
     expect(verifyTxns.displayName).toBe('Verify OCR extraction');
     const untitled = defineHumanNode({
       name: 'approve_final_report',
-      outputKind: 'approved_report',
-      inputKinds: { report: 'final_report' },
+      outputNodeparamslot: 'approved_report',
+      inputNodeparamslots: { report: 'final_report' },
       run: ({ report }: { report: ArtifactHandle }): HumanTask => ({
         instructions: 'Approve.',
         payload: { report },
@@ -176,10 +180,10 @@ describe('defineWorkflow', () => {
   });
 });
 
-describe('kindClasses', () => {
-  it('classifies declared kinds: computed iff some node produces them, else leaf', () => {
+describe('nodeparamslotClasses', () => {
+  it('classifies declared nodeparamslots: computed iff some node produces them, else leaf', () => {
     const wd = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns]);
-    expect(kindClasses(wd)).toEqual({
+    expect(nodeparamslotClasses(wd)).toEqual({
       brokerage_statement: 'leaf',
       ocr_txns: 'computed',
       verified_txns: 'computed',
@@ -189,112 +193,128 @@ describe('kindClasses', () => {
 });
 
 describe('validateCatalog', () => {
-  // A fully consistent single workflow: every computed kind produced, every leaf unproduced.
-  const consistentKinds: readonly Kind[] = [
-    { kind: 'brokerage_statement', source: 'upload', display: 'Brokerage statement (PDF)' },
-    { kind: 'ocr_txns', source: 'computed' },
-    { kind: 'verified_txns', source: 'computed' },
+  // A fully consistent single workflow: every computed nodeparamslot produced, every leaf unproduced.
+  const consistentNodeparamslots: readonly Nodeparamslot[] = [
+    { nodeparamslot: 'brokerage_statement', source: 'upload', display: 'Brokerage statement (PDF)' },
+    { nodeparamslot: 'ocr_txns', source: 'computed' },
+    { nodeparamslot: 'verified_txns', source: 'computed' },
   ];
 
   it('accepts a reconciled workflow', () => {
-    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], consistentKinds);
+    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], consistentNodeparamslots);
     expect(() => validateCatalog([wd])).not.toThrow();
   });
 
-  it('rejects a kind declared twice in one workflow', () => {
+  it('rejects a nodeparamslot declared twice in one workflow', () => {
     const wd = makeWorkflow(
       'tax_demo_workflow',
       [],
       [
-        { kind: 'brokerage_statement', source: 'upload' },
-        { kind: 'brokerage_statement', source: 'upload' },
+        { nodeparamslot: 'brokerage_statement', source: 'upload' },
+        { nodeparamslot: 'brokerage_statement', source: 'upload' },
       ]
     );
-    expect(() => validateCatalog([wd])).toThrow("tax_demo_workflow: kind 'brokerage_statement' declared twice");
-  });
-
-  it('rejects a node whose output kind is undeclared', () => {
-    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement], [{ kind: 'brokerage_statement', source: 'upload' }]);
     expect(() => validateCatalog([wd])).toThrow(
-      "tax_demo_workflow/ocr_brokerage_statement: output kind 'ocr_txns' is not declared by the workflow"
+      "tax_demo_workflow: nodeparamslot 'brokerage_statement' declared twice"
     );
   });
 
-  it('rejects a param consuming an undeclared kind', () => {
-    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement], [{ kind: 'ocr_txns', source: 'computed' }]);
+  it('rejects a node whose output nodeparamslot is undeclared', () => {
+    const wd = makeWorkflow(
+      'tax_demo_workflow',
+      [ocrStatement],
+      [{ nodeparamslot: 'brokerage_statement', source: 'upload' }]
+    );
     expect(() => validateCatalog([wd])).toThrow(
-      "tax_demo_workflow/ocr_brokerage_statement: param 'statement' consumes kind 'brokerage_statement' which is not declared by the workflow"
+      "tax_demo_workflow/ocr_brokerage_statement: output nodeparamslot 'ocr_txns' is not declared by the workflow"
     );
   });
 
-  it('rejects a produced kind declared with a leaf source', () => {
+  it('rejects a param consuming an undeclared nodeparamslot', () => {
+    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement], [{ nodeparamslot: 'ocr_txns', source: 'computed' }]);
+    expect(() => validateCatalog([wd])).toThrow(
+      "tax_demo_workflow/ocr_brokerage_statement: param 'statement' consumes nodeparamslot 'brokerage_statement' which is not declared by the workflow"
+    );
+  });
+
+  it('rejects a produced nodeparamslot declared with a leaf source', () => {
     const wd = makeWorkflow(
       'tax_demo_workflow',
       [ocrStatement, verifyTxns],
       [
-        { kind: 'brokerage_statement', source: 'upload' },
-        { kind: 'ocr_txns', source: 'upload' },
-        { kind: 'verified_txns', source: 'computed' },
+        { nodeparamslot: 'brokerage_statement', source: 'upload' },
+        { nodeparamslot: 'ocr_txns', source: 'upload' },
+        { nodeparamslot: 'verified_txns', source: 'computed' },
       ]
     );
     expect(() => validateCatalog([wd])).toThrow(
-      "tax_demo_workflow: kind 'ocr_txns' is produced by a node but declared with leaf source 'upload'"
+      "tax_demo_workflow: nodeparamslot 'ocr_txns' is produced by a node but declared with leaf source 'upload'"
     );
   });
 
-  it('rejects an unproduced computed kind unless declared as intake', () => {
-    const orphanKinds: readonly Kind[] = [
-      { kind: 'brokerage_statement', source: 'upload' },
-      { kind: 'ocr_txns', source: 'computed' },
-      { kind: 'verified_txns', source: 'computed' },
-      { kind: 'master_txn_list', source: 'computed' },
+  it('rejects an unproduced computed nodeparamslot unless declared as intake', () => {
+    const orphanNodeparamslots: readonly Nodeparamslot[] = [
+      { nodeparamslot: 'brokerage_statement', source: 'upload' },
+      { nodeparamslot: 'ocr_txns', source: 'computed' },
+      { nodeparamslot: 'verified_txns', source: 'computed' },
+      { nodeparamslot: 'master_txn_list', source: 'computed' },
     ];
-    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], orphanKinds);
+    const wd = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], orphanNodeparamslots);
     expect(() => validateCatalog([wd])).toThrow(
-      "tax_demo_workflow: computed kind 'master_txn_list' has no producing node — declare intake: true if it arrives from another workflow"
+      "tax_demo_workflow: computed nodeparamslot 'master_txn_list' has no producing node — declare intake: true if it arrives from another workflow"
     );
-    const withIntake = orphanKinds.map((k) => (k.kind === 'master_txn_list' ? ({ ...k, intake: true } as Kind) : k));
+    const withIntake = orphanNodeparamslots.map((k) =>
+      k.nodeparamslot === 'master_txn_list' ? ({ ...k, intake: true } as Nodeparamslot) : k
+    );
     const wd2 = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], withIntake);
     expect(() => validateCatalog([wd2])).not.toThrow();
   });
 
-  it('rejects cross-workflow source/display conflicts for one kind, naming both declarations', () => {
-    const a = makeWorkflow('wf_a', [], [{ kind: 'brokerage_statement', source: 'upload', display: 'A' }]);
-    const b = makeWorkflow('wf_b', [], [{ kind: 'brokerage_statement', source: 'questionnaire', display: 'A' }]);
+  it('rejects cross-workflow source/display conflicts for one nodeparamslot, naming both declarations', () => {
+    const a = makeWorkflow('wf_a', [], [{ nodeparamslot: 'brokerage_statement', source: 'upload', display: 'A' }]);
+    const b = makeWorkflow(
+      'wf_b',
+      [],
+      [{ nodeparamslot: 'brokerage_statement', source: 'questionnaire', display: 'A' }]
+    );
     expect(() => validateCatalog([a, b])).toThrow(ValidationError);
     expect(() => validateCatalog([a, b])).toThrow(
-      "kind 'brokerage_statement': wf_b declares source 'questionnaire'/display 'A' but wf_a declared 'upload'/'A'"
+      "nodeparamslot 'brokerage_statement': wf_b declares source 'questionnaire'/display 'A' but wf_a declared 'upload'/'A'"
     );
-    const c = makeWorkflow('wf_c', [], [{ kind: 'brokerage_statement', source: 'upload', display: 'DIFFERENT' }]);
+    const c = makeWorkflow(
+      'wf_c',
+      [],
+      [{ nodeparamslot: 'brokerage_statement', source: 'upload', display: 'DIFFERENT' }]
+    );
     expect(() => validateCatalog([a, c])).toThrow(
-      "kind 'brokerage_statement': wf_c declares source 'upload'/display 'DIFFERENT' but wf_a declared 'upload'/'A'"
+      "nodeparamslot 'brokerage_statement': wf_c declares source 'upload'/display 'DIFFERENT' but wf_a declared 'upload'/'A'"
     );
   });
 
   it('rejects the same node_id declared with a different shape across workflows — every axis', () => {
-    const v1 = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], consistentKinds);
+    const v1 = makeWorkflow('tax_demo_workflow', [ocrStatement, verifyTxns], consistentNodeparamslots);
     const divergences: readonly NodeDef[] = [
       // displayName divergence (the axis that would have caught the v1/v2 25%→24% edit)
       defineNode({
         name: 'ocr_brokerage_statement',
-        outputKind: 'ocr_txns',
-        inputKinds: { statement: 'brokerage_statement' },
+        outputNodeparamslot: 'ocr_txns',
+        inputNodeparamslots: { statement: 'brokerage_statement' },
         displayName: 'OCR brokerage statement (DIFFERENT)',
         run: async ({ statement }: { statement: ArtifactHandle }) => ({ lines: [await statement.text()] }),
       }),
-      // outputKind divergence
+      // outputNodeparamslot divergence
       defineNode({
         name: 'ocr_brokerage_statement',
-        outputKind: 'verified_txns',
-        inputKinds: { statement: 'brokerage_statement' },
+        outputNodeparamslot: 'verified_txns',
+        inputNodeparamslots: { statement: 'brokerage_statement' },
         displayName: 'OCR brokerage statement (mock)',
         run: async ({ statement }: { statement: ArtifactHandle }) => ({ lines: [await statement.text()] }),
       }),
       // param-list divergence
       defineNode({
         name: 'ocr_brokerage_statement',
-        outputKind: 'ocr_txns',
-        inputKinds: { statement: 'brokerage_statement', page: null },
+        outputNodeparamslot: 'ocr_txns',
+        inputNodeparamslots: { statement: 'brokerage_statement', page: null },
         displayName: 'OCR brokerage statement (mock)',
         run: async ({ statement }: { statement: ArtifactHandle; page: string }) => ({
           lines: [await statement.text()],
@@ -303,8 +323,8 @@ describe('validateCatalog', () => {
       // executor divergence (engine name reused by a human node)
       defineHumanNode({
         name: 'ocr_brokerage_statement',
-        outputKind: 'ocr_txns',
-        inputKinds: { statement: 'brokerage_statement' },
+        outputNodeparamslot: 'ocr_txns',
+        inputNodeparamslots: { statement: 'brokerage_statement' },
         title: 'OCR brokerage statement (mock)',
         run: ({ statement }: { statement: ArtifactHandle }): HumanTask => ({
           instructions: 'Extract.',
@@ -314,14 +334,14 @@ describe('validateCatalog', () => {
       }),
     ];
     for (const divergent of divergences) {
-      const v2 = makeWorkflow('tax_demo_workflow_v2', [divergent, verifyTxns], consistentKinds);
+      const v2 = makeWorkflow('tax_demo_workflow_v2', [divergent, verifyTxns], consistentNodeparamslots);
       expect(() => validateCatalog([v1, v2])).toThrow(ValidationError);
       expect(() => validateCatalog([v1, v2])).toThrow(
         /node 'ocr_brokerage_statement' is declared with a different shape in tax_demo_workflow_v2 than in tax_demo_workflow/
       );
     }
     // Identical shape under one name across workflows stays legal — that IS the memo-reuse story.
-    const twin = makeWorkflow('tax_demo_workflow_v2', [ocrStatement, verifyTxns], consistentKinds);
+    const twin = makeWorkflow('tax_demo_workflow_v2', [ocrStatement, verifyTxns], consistentNodeparamslots);
     expect(() => validateCatalog([v1, twin])).not.toThrow();
   });
 });

@@ -17,11 +17,16 @@ standards that the "Deviations" section of `backend/README.md` is written agains
 
 **Current state (frozen 2026-07-19).** The backend is the product and is current. The frontend
 (`frontend/`) predates the latest wire-contract changes and is KNOWN BROKEN against the current
-API: `task_queue` and `code_hash` left the wire, and `source`, `origin`, and `input_kinds`
+API: `task_queue` and `code_hash` left the wire, and `source`, `origin`, and `input_nodeparamslots`
 arrived (see "Wire contracts"), as did the additive hygiene fields (`updated_by`/`updated_at` on
 artifacts/workspaces/engagements, `created_by` on engagements, `created_by`/`created_at` on node
 runs, `created_at`/`updated_at` on catalog workflows; reviewer names now arrive as `user:<name>`
-principals). Porting it, and all e2e work, is deliberately deferred.
+principals). It also predates the 2026-07-20 global renames: the domain term "kind" became
+`nodeparamslot` everywhere (wire keys `kind`→`nodeparamslot`, `kinds`→`nodeparamslots`,
+`output_kind`→`output_nodeparamslot`, `input_kinds`→`input_nodeparamslots`, the upload multipart
+field and browse query param included), and the `label` field on engagements/artifacts/workspaces
+became `display_name` (request bodies and responses). The frontend still speaks the old
+vocabulary. Porting it, and all e2e work, is deliberately deferred.
 
 ## The domain model
 
@@ -32,23 +37,23 @@ constant in `backend/src/infrastructure/db/Db.ts`).
   are engagement-scoped; across engagements nothing is ever shared. One boundary serves both
   reuse and confidentiality, on purpose.
 - **Artifact** (`artifacts`) — an immutable value: uploaded document, questionnaire answers, or
-  a computed result. Identity is content, never provenance: `UNIQUE (engagement_id, kind, hash)`
-  where `hash` is sha256 of the payload bytes. Identical bytes under one kind converge to one
+  a computed result. Identity is content, never provenance: `UNIQUE (engagement_id, nodeparamslot, hash)`
+  where `hash` is sha256 of the payload bytes. Identical bytes under one nodeparamslot converge to one
   row; re-uploading the same document revives all work that consumed it. Payload bytes live
   outside the db, content-addressed at `{engagement_id}/{content_hash}` under the storage root
   (`writePayload` in `backend/src/infrastructure/storage/Storage.ts`, write-once).
-- **Kind** (`kinds`) — the type of an artifact and a first-class business object. Every kind has
-  an authored `source`, the channel data of that kind enters through: `upload`, `questionnaire`,
-  or `email` (leaf channels: supplied by users) or `computed` (produced by nodes). `artifacts.kind` and
-  `nodes.output_kind` are foreign keys into `kinds`, so an unpublished kind cannot enter the
+- **Nodeparamslot** (`nodeparamslots`) — the type of an artifact and a first-class business object. Every nodeparamslot has
+  an authored `source`, the channel data of that nodeparamslot enters through: `upload`, `questionnaire`,
+  or `email` (leaf channels: supplied by users) or `computed` (produced by nodes). `artifacts.nodeparamslot` and
+  `nodes.output_nodeparamslot` are foreign keys into `nodeparamslots`, so an unpublished nodeparamslot cannot enter the
   ledger.
 - **Node** — one computation step, declared with `defineNode`/`defineHumanNode`
   (`backend/src/domain/registry/Registry.ts`). A node declares its `name` (the node id), its
-  `outputKind`, and `inputKinds` — a total map from every parameter to the artifact kind it
-  consumes, or `null` for a scalar argument. `inputKinds` IS the parameter declaration;
+  `outputNodeparamslot`, and `inputNodeparamslots` — a total map from every parameter to the artifact nodeparamslot it
+  consumes, or `null` for a scalar argument. `inputNodeparamslots` IS the parameter declaration;
   `paramNames` is derived from its keys. The catalog mirrors nodes into the `nodes` and
-  `node_input_kinds` tables.
-- **Workflow** (`workflows` + `workflow_kinds`) — a versioned composition: a declared kind
+  `node_input_nodeparamslots` tables.
+- **Workflow** (`workflows` + `workflow_nodeparamslots`) — a versioned composition: a declared nodeparamslot
   vocabulary, a node list, and a `run(ctx)` function that IS the DAG (plain TypeScript control
   flow calling `ctx.node(...)`). Declared with `defineWorkflow`; every version is listed in the
   `ALL_WORKFLOWS` manifest (`backend/src/workflows/index.ts`).
@@ -62,7 +67,7 @@ constant in `backend/src/infrastructure/db/Db.ts`).
 The ledger of computations is `node_runs` + `node_run_inputs`: one `node_runs` row per DISTINCT
 answered question (not per execution — memo hits insert nothing), with `node_run_inputs` holding
 the consumed-artifact edges. Ledger tables are insert-only; the mutable ledger columns are
-`artifacts.label` and its `updated_by`/`updated_at` stamps (`renameArtifact` in Db.ts).
+`artifacts.display_name` and its `updated_by`/`updated_at` stamps (`renameArtifact` in Db.ts).
 
 ### Actors and hygiene columns
 
@@ -90,7 +95,7 @@ only record of who approved it.
 
 Two hashes define everything:
 
-- **Artifact identity** = `(engagement_id, kind, sha256(payload bytes))`. No provenance inside.
+- **Artifact identity** = `(engagement_id, nodeparamslot, sha256(payload bytes))`. No provenance inside.
 - **Question identity (the memo key)** = `sha256(node_id ':' input_hash)` (`memoKey` in
   `backend/src/domain/canonical/Canonical.ts`), where `input_hash` is the hash of the canonical
   argument map. Engagement scoping applies at lookup via `UNIQUE (engagement_id, memo_key)` on
@@ -99,11 +104,11 @@ Two hashes define everything:
 Consequences:
 
 - **The node's declared name is its version identity (the naming contract).** There is no code
-  hash. A behavior change — body, helper, validator, output kind, executor — REQUIRES a rename
+  hash. A behavior change — body, helper, validator, output nodeparamslot, executor — REQUIRES a rename
   (`calculate_tax` → `calculate_tax_v2`); an unchanged name keeps serving previously memoized
   answers, including human ones. Nothing mechanical catches a forgotten rename; `validateCatalog`
   (Registry.ts, run by every publish) catches what it can — the same node id declared with a
-  different shape (executor/outputKind/inputKinds/displayName) across workflows is a publish
+  different shape (executor/outputNodeparamslot/inputNodeparamslots/displayName) across workflows is a publish
   error — and the rest is contract.
 - **Canonical JSON is the hashing substrate** (`canonicalBytes` in Canonical.ts): sorted keys,
   NFC-normalized strings, floats banned (money is decimal strings end to end — `DecimalString`
@@ -116,7 +121,7 @@ Consequences:
   `artifact_facts` view (in `SCHEMA`, Db.ts) derives `produced_by_node_run` (earliest `node_runs`
   row whose `output_artifact_id` points at the artifact — several runs can converge on one
   artifact) and `origin`: `produced` when a producing run exists, else `override` for a
-  hand-supplied computed kind, else the kind's authored source. Read models read the view;
+  hand-supplied computed nodeparamslot, else the nodeparamslot's authored source. Read models read the view;
   the memo and write path (`memoLookup`, `recordCompletion`, `supplyArtifact`) stays on base
   tables. Nothing
   stored can diverge from lineage.
@@ -134,17 +139,17 @@ backend/                    the product (Node 22+, npm — not yarn)
   src/domain/               pure + bundle-safe (imported by Temporal sandbox code; no node:*)
     canonical/Canonical.ts    canonical JSON, sha256Hex, hashValue, memoKey — the hashing contract
     registry/Registry.ts      defineNode/defineHumanNode/defineWorkflow, buildRegistry,
-                              kindClasses, validateCatalog — definitions and publish validation
+                              nodeparamslotClasses, validateCatalog — definitions and publish validation
     money/DecimalString.ts    BigInt decimal-string arithmetic (ROUND_HALF_UP), no floats
     artifact/                 ArtifactRef (wire shape) + ArtifactHandle (loader-injected payload access)
     json/JsonValue.ts         the JSON value type + zod schema
   src/workflows/            the authored product — one folder per workflow version
     index.ts                  ALL_WORKFLOWS manifest; static imports feed the Temporal bundler
     nodes_shared/             version-spanning library (not a workflow folder — no workflow.ts):
-                              enums.ts (SharedKind/SharedNodeId/SHARED_KINDS), helpers.ts,
+                              enums.ts (SharedNodeparamslot/SharedNodeId/SHARED_NODEPARAMSLOTS), helpers.ts,
                               one node per file (ocr_brokerage_statement.ts, ocr_payment_slip.ts,
                               verify_txns.ts, append_to_master.ts)
-    tax_demo_workflow/        enums.ts (Kind/NodeId/KINDS — the version's contract) +
+    tax_demo_workflow/        enums.ts (Nodeparamslot/NodeId/NODEPARAMSLOTS — the version's contract) +
                               nodes_special/ (calculate_tax.ts, build_report.ts — 25%) +
                               workflow.ts (defineWorkflow + the run() DAG, nothing else)
     tax_demo_workflow_v2/     same shape: 24% rate + residency questionnaire; changed nodes are
@@ -152,7 +157,7 @@ backend/                    the product (Node 22+, npm — not yarn)
   src/temporal/             the execution engine
     Workflows.ts              bundle entry; GraphflowRun + GraphflowHumanTask (function name ==
                               Temporal workflow type); queries progress/snapshot/task_info; submit update
-    Context.ts                Ctx — the memoize-or-execute walk; encodeArgs; enforceInputKinds
+    Context.ts                Ctx — the memoize-or-execute walk; encodeArgs; enforceInputNodeparamslots
     Activities.ts             node-side I/O: memo_lookup, attach_artifact, run_engine_node,
                               ensure_human_task, record_human_completion (keys == wire activity names)
     Runtime.ts                Temporal client/worker factories, startWorkspace dispatch,
@@ -199,25 +204,25 @@ make the source match that. One name, one behavior, everywhere: an edit to a sha
 every workflow that lists it, so a behavior change there forces a rename, which re-executes in
 every importing workflow. Versioned behavior lives only in `nodes_special/`. Vocabularies are
 `as const` objects (not TS enums) because per-workflow vocabularies are composed by spreading
-`SharedKind`/`SHARED_KINDS`; no raw kind or node-id string literals appear at definition sites.
+`SharedNodeparamslot`/`SHARED_NODEPARAMSLOTS`; no raw nodeparamslot or node-id string literals appear at definition sites.
 
 ## The catalog (publish)
 
 `publishCatalog` (Db.ts) mirrors the in-memory registry into the db at every boot and `cli init`.
 First it runs `validateCatalog` (Registry.ts) over the registry — never over possibly-stale db
-rows. Checks: no duplicate kind declarations per workflow; every `outputKind` and consumed kind
-is declared; authored source reconciles with the derived class (`kindClasses`: a kind is
-`computed` iff some node in the workflow produces it — a produced kind must be authored
-`computed`; an unproduced `computed` kind must be flagged `intake: true`, meaning another
-workflow's output attached as input); one kind = one source+display globally; one node id = one
+rows. Checks: no duplicate nodeparamslot declarations per workflow; every `outputNodeparamslot` and consumed nodeparamslot
+is declared; authored source reconciles with the derived class (`nodeparamslotClasses`: a nodeparamslot is
+`computed` iff some node in the workflow produces it — a produced nodeparamslot must be authored
+`computed`; an unproduced `computed` nodeparamslot must be flagged `intake: true`, meaning another
+workflow's output attached as input); one nodeparamslot = one source+display globally; one node id = one
 declared shape globally.
 
-Then, in one transaction: `workflows` and `kinds` and `nodes` are upsert-only (retired rows
+Then, in one transaction: `workflows` and `nodeparamslots` and `nodes` are upsert-only (retired rows
 persist — they are FK parents of the ledger, and a workspace pointing at a retired workflow must
-fail loud, not vanish); `workflow_kinds` (membership) and `node_input_kinds` (param → kind) are
+fail loud, not vanish); `workflow_nodeparamslots` (membership) and `node_input_nodeparamslots` (param → nodeparamslot) are
 DELETE-then-INSERT, so declarations removed from code stop lingering. `catalogSnapshot` (Db.ts)
 serves the mirror with `leaf` derived per workflow in SQL (no node of the workflow produces the
-kind) — leafness is never stored. Known accepted skew: retired `nodes` rows still count as
+nodeparamslot) — leafness is never stored. Known accepted skew: retired `nodes` rows still count as
 producers in that derivation until a db reset.
 
 ## How a run executes
@@ -239,7 +244,7 @@ sequenceDiagram
     API-->>U: 202 { temporal_workflow_id } — from here the API only polls (SSE, bottom)
 
     TC-->>WF: workflow task (worker long-polls the env queue)
-    Note over WF: GraphflowRun(inp) — deterministic sandbox: no I/O, no db, no clock.<br/>Per ctx.node(): reject unknown params, null-fill absent ones,<br/>enforce inputKinds, encode args ({$artifact: content-hash}),<br/>mint memo_key = sha256(node_id ':' input_hash) — pure JS.
+    Note over WF: GraphflowRun(inp) — deterministic sandbox: no I/O, no db, no clock.<br/>Per ctx.node(): reject unknown params, null-fill absent ones,<br/>enforce inputNodeparamslots, encode args ({$artifact: content-hash}),<br/>mint memo_key = sha256(node_id ':' input_hash) — pure JS.
     WF->>TC: schedule memo_lookup, park
     TC-->>ACT: activity task
     ACT->>DB: SELECT ... WHERE engagement_id=? AND memo_key=?
@@ -253,7 +258,7 @@ sequenceDiagram
         TC-->>ACT: activity task
         ACT->>DB: memoLookup again (retry guard), read input payloads
         Note over ACT: def.run(args) — the ONLY place a node body executes
-        ACT->>DB: recordCompletion: BEGIN IMMEDIATE, memo re-check,<br/>assert output kind is computed, INSERT artifact (ON CONFLICT DO NOTHING),<br/>INSERT node_run + node_run_inputs, attach, COMMIT
+        ACT->>DB: recordCompletion: BEGIN IMMEDIATE, memo re-check,<br/>assert output nodeparamslot is computed, INSERT artifact (ON CONFLICT DO NOTHING),<br/>INSERT node_run + node_run_inputs, attach, COMMIT
     else MISS, human node
         WF->>TC: schedule ensure_human_task, park
         ACT->>TC: workflow.start(GraphflowHumanTask,<br/>id=node-{instance}-{engagement}-{memo_key}, USE_EXISTING)
@@ -285,8 +290,8 @@ The same walk in prose:
 3. `GraphflowRun` (Workflows.ts) executes in the deterministic sandbox — no I/O, no clock, no
    db. It resolves the workflow from the compiled-in registry and calls its `run(ctx)`.
 4. `Ctx.node(def, args)` (Context.ts) is the walk, per node call: verify the node is registered
-   for this workflow; reject unknown parameters; null-fill absent ones; enforce `inputKinds`
-   (every artifact argument must carry the declared kind — single, list, or nested; scalar
+   for this workflow; reject unknown parameters; null-fill absent ones; enforce `inputNodeparamslots`
+   (every artifact argument must carry the declared nodeparamslot — single, list, or nested; scalar
    params accept no artifacts); encode arguments three ways (hash form, transport form, input
    artifact ids); mint `memo_key = sha256(node_id ':' input_hash)`; ask the `memo_lookup`
    activity. Hit → attach the existing artifact to the workspace and return its handle — the
@@ -296,8 +301,8 @@ The same walk in prose:
    one open task per distinct question), then the run polls the memo with capped backoff
    (1s → 30s) as a durable timer until the answer appears.
 5. `recordCompletion` (Db.ts) is the one atomic, idempotent completion transaction: re-check
-   the memo (activity-retry guard), assert the output kind is `computed` (runs may not produce
-   leaf kinds), insert the artifact (`ON CONFLICT (engagement_id, kind, hash) DO NOTHING` — the
+   the memo (activity-retry guard), assert the output nodeparamslot is `computed` (runs may not produce
+   leaf nodeparamslots), insert the artifact (`ON CONFLICT (engagement_id, nodeparamslot, hash) DO NOTHING` — the
    convergence path), insert the `node_runs` row (SQLite assigns the id) and `node_run_inputs`,
    attach to the requesting workspace. A lost race on `UNIQUE (engagement_id, memo_key)`
    resolves to the winner via the catch path. `run_engine_node` byte-encodes results by
@@ -320,9 +325,9 @@ The same walk in prose:
 
 ## Supplying artifacts
 
-`POST /engagements/:id/artifacts` (routes/Artifacts.ts) accepts a multipart upload with a `kind`
-field. `supplyArtifact` (Db.ts) rejects kinds absent from the published vocabulary BEFORE
-writing the payload (no orphaned blobs). Supplying a `computed` kind stays legal — hand-staging a
+`POST /engagements/:id/artifacts` (routes/Artifacts.ts) accepts a multipart upload with a `nodeparamslot`
+field. `supplyArtifact` (Db.ts) rejects nodeparamslots absent from the published vocabulary BEFORE
+writing the payload (no orphaned blobs). Supplying a `computed` nodeparamslot stays legal — hand-staging a
 corrected intermediate is supported and derives `origin: 'override'`.
 
 The questionnaire channel: with multipart field `canonical_json=true`, the route parses the
@@ -340,11 +345,11 @@ internal identifiers are camelCase. The shapes a frontend consumes:
 
 - **Catalog** (`GET /catalog`, `CatalogWorkflowOut` in Schemas.ts): per workflow —
   `superseded_by` (derived from the `_v{n}` id convention, routes/Catalog.ts); `created_at` /
-  `updated_at` publish stamps (workflow level only); kinds with `source` (authored) and `leaf`
-  (derived boolean); nodes with `output_kind` and `input_kinds` (param → kind | null — enough to
+  `updated_at` publish stamps (workflow level only); nodeparamslots with `source` (authored) and `leaf`
+  (derived boolean); nodes with `output_nodeparamslot` and `input_nodeparamslots` (param → nodeparamslot | null — enough to
   render the dataflow graph without executing it). No `task_queue`, no `code_hash`.
 - **Artifacts** (`ArtifactMetaOut`, Serializers.ts): `created_by`/`created_at` (first-filer
-  principal + time) and `updated_by`/`updated_at` (label renames); `produced_by_node_run` and
+  principal + time) and `updated_by`/`updated_at` (display-name renames); `produced_by_node_run` and
   `origin` (`produced | upload | questionnaire | email | override`) — both derived by
   `artifact_facts`; `payload_available` derived from `payload_ref`, which is never exposed.
   Lineage (`GET /artifacts/:id`) serves `produced_by` + `consumed_by` as node runs.
@@ -365,10 +370,10 @@ internal identifiers are camelCase. The shapes a frontend consumes:
 
 1. Identity is content, never provenance; engagement scoping applies at lookup, never inside a
    hash. Paths, refs, ids, and workspaces never enter memo keys or artifact identity.
-2. The ledger is insert-only in content; the mutable ledger columns are `artifacts.label` and
+2. The ledger is insert-only in content; the mutable ledger columns are `artifacts.display_name` and
    its `updated_*` stamps. `created_*` is immutable everywhere — convergence keeps the first
    filer. The only DELETEs in the system: workspace detach (user-facing) and the publish
-   transaction rewriting the `workflow_kinds`/`node_input_kinds` mirrors. `deleted_at` columns
+   transaction rewriting the `workflow_nodeparamslots`/`node_input_nodeparamslots` mirrors. `deleted_at` columns
    are dormant (reserved; nothing sets or filters them).
 3. Behavior change ⇒ node rename. Shared code (`nodes_shared/`) must never carry versioned
    behavior.
@@ -397,9 +402,9 @@ suite alone: `npm run test -- src/infrastructure/db/Db.test.ts` (plus `test:watc
 `test:coverage`). Suites (vitest, all colocated):
 
 - `Canonical.test.ts`, `DecimalString.test.ts`, `Env.test.ts`, `Storage.test.ts` — pure units.
-- `Registry.test.ts` — definition factories, `kindClasses`, every `validateCatalog` rule
+- `Registry.test.ts` — definition factories, `nodeparamslotClasses`, every `validateCatalog` rule
   (one negative test per rule), registry lookup.
-- `Context.test.ts` — `enforceInputKinds` and the `Ctx` guards (everything that fires before an
+- `Context.test.ts` — `enforceInputNodeparamslots` and the `Ctx` guards (everything that fires before an
   activity call; the happy path needs a live activity proxy).
 - `Db.test.ts` — ledger semantics (revive, convergence, idempotent completion, derived origin,
   reverse-edge lineage, input edges), hygiene semantics (first-filer `created_*`, stamped

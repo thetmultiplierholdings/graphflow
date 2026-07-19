@@ -9,20 +9,20 @@ import { appendToMaster } from '../nodes_shared/append_to_master.js';
 import { ocrBrokerageStatement } from '../nodes_shared/ocr_brokerage_statement.js';
 import { ocrPaymentSlip } from '../nodes_shared/ocr_payment_slip.js';
 import { verifyTxns } from '../nodes_shared/verify_txns.js';
-import { KINDS, Kind } from './enums.js';
+import { NODEPARAMSLOTS, Nodeparamslot } from './enums.js';
 import { buildReportV2 } from './nodes_special/build_report_v2.js';
 import { calculateTaxV2 } from './nodes_special/calculate_tax_v2.js';
 
 export const taxDemoWorkflowV2 = defineWorkflow({
   id: 'tax_demo_workflow_v2',
   displayName: 'Tax demo workflow v2',
-  kinds: KINDS,
+  nodeparamslots: NODEPARAMSLOTS,
   nodes: [ocrBrokerageStatement, ocrPaymentSlip, verifyTxns, appendToMaster, calculateTaxV2, buildReportV2],
   run: async (ctx) => {
-    const statements = ctx.attached(Kind.BrokerageStatement);
-    const slips = ctx.attached(Kind.PaymentSlip);
+    const statements = ctx.attached(Nodeparamslot.BrokerageStatement);
+    const slips = ctx.attached(Nodeparamslot.PaymentSlip);
     // The questionnaire channel: exactly one answered residency form per run.
-    const residency = ctx.attachedOne(Kind.ResidencyAnswers);
+    const residency = ctx.attachedOne(Nodeparamslot.ResidencyAnswers);
 
     const brokerageChain = async (doc: ArtifactHandle): Promise<ArtifactHandle> => {
       const ocr = await ctx.node(ocrBrokerageStatement, { statement: doc });

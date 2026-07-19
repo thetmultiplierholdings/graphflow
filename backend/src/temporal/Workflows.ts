@@ -40,7 +40,7 @@ export interface TaskInput {
   workflow_id: string;
   node_id: string;
   memo_key: string;
-  output_kind: string;
+  output_nodeparamslot: string;
   display_name: string;
   instructions: string;
   payload: TransportValue;
@@ -76,7 +76,7 @@ export async function GraphflowRun(inp: RunInput): Promise<Summary> {
       `workflow '${inp.workflow_id}' is not registered on this worker (catalog/worker deploy order?)`
     );
   }
-  // An empty snapshot is legal (all-optional workflows): per-kind cardinality is enforced by the
+  // An empty snapshot is legal (all-optional workflows): per-nodeparamslot cardinality is enforced by the
   // ctx accessors, not a blanket guard.
   const runCtx = new Ctx(inp, REGISTRY);
   ctx = runCtx;

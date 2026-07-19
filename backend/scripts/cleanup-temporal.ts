@@ -11,7 +11,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { connect, instanceId } from '../src/infrastructure/db/Db.js';
 import { loadEnv } from '../src/infrastructure/env/Env.js';
-import { humanTaskIdPrefix, runIdPrefix } from '../src/temporal/Ids.js';
+import { HUMAN_TASK_WORKFLOW_TYPE, humanTaskIdPrefix, RUN_WORKFLOW_TYPE, runIdPrefix } from '../src/temporal/Ids.js';
 import { connectClient } from '../src/temporal/Runtime.js';
 
 const out = (line: string): void => {
@@ -31,7 +31,9 @@ async function main(dbPath: string): Promise<void> {
   const client = await connectClient(env);
   try {
     const prefixes = [runIdPrefix(instance), humanTaskIdPrefix(instance)];
-    const query = `TaskQueue = '${env.temporalTaskQueue}' AND ExecutionStatus = 'Running'`;
+    // Scoped by workflow TYPE + instance prefix, never by TaskQueue: stale runs sit on whatever
+    // queue was configured when they started, so a queue rename would hide them from this sweep.
+    const query = `WorkflowType IN ('${RUN_WORKFLOW_TYPE}', '${HUMAN_TASK_WORKFLOW_TYPE}') AND ExecutionStatus = 'Running'`;
 
     // Visibility is eventually consistent (a task workflow started moments ago may not be listed
     // yet), so sweep until a pass finds nothing.

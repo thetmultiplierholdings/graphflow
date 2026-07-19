@@ -20,7 +20,7 @@ import {
 import type { Env } from '../infrastructure/env/Env.js';
 import { RuntimeError } from '../shared/errors/Errors.js';
 import type { Summary } from '../temporal/Context.js';
-import { humanTaskIdPrefix, runIdPrefix } from '../temporal/Ids.js';
+import { HUMAN_TASK_WORKFLOW_TYPE, humanTaskIdPrefix, RUN_WORKFLOW_TYPE, runIdPrefix } from '../temporal/Ids.js';
 import type { WorkerHandle } from '../temporal/Runtime.js';
 import { connectClient, createWorker, startWorkspace } from '../temporal/Runtime.js';
 import { Kind as V1Kind } from '../workflows/tax_demo_workflow/enums.js';
@@ -159,12 +159,15 @@ export async function cmdDemo(env: Env): Promise<void> {
 // ---------- seed: the demo dataset the frontend e2e suite depends on ----------
 
 // Terminate any open Temporal workflows carrying the OLD instance prefix so orphaned runs don't
-// burn the shared task queue forever.
-async function terminateStaleRuns(client: Client, taskQueue: string, oldInstance: string): Promise<void> {
+// linger in the shared namespace forever. Scoped by WORKFLOW TYPE + instance-id prefix, never by
+// TaskQueue: the old runs live on whatever queue was configured when they STARTED, so a
+// TEMPORAL_TASK_QUEUE rename between resets would hide them from a queue-scoped sweep (which is
+// exactly how three runs got stranded on 2026-07-20).
+async function terminateStaleRuns(client: Client, oldInstance: string): Promise<void> {
   const prefixes = [runIdPrefix(oldInstance), humanTaskIdPrefix(oldInstance)];
   try {
     for await (const wf of client.workflow.list({
-      query: `TaskQueue = '${taskQueue}' AND ExecutionStatus = 'Running'`,
+      query: `WorkflowType IN ('${RUN_WORKFLOW_TYPE}', '${HUMAN_TASK_WORKFLOW_TYPE}') AND ExecutionStatus = 'Running'`,
     })) {
       if (!prefixes.some((p) => wf.workflowId.startsWith(p))) {
         continue;
@@ -199,7 +202,7 @@ async function freshTeardown(client: Client, env: Env): Promise<void> {
     // unreadable db — nothing to terminate
   }
   if (oldInstance !== null) {
-    await terminateStaleRuns(client, env.temporalTaskQueue, oldInstance);
+    await terminateStaleRuns(client, oldInstance);
   }
   for (const suffix of ['', '-wal', '-shm']) {
     rmSync(`${env.dbPath}${suffix}`, { force: true });

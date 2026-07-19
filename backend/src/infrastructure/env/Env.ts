@@ -19,7 +19,9 @@ export interface Env {
 const EnvSchema = z.object({
   TEMPORAL_ADDRESS: z.string().min(1).default('localhost:7233'),
   TEMPORAL_NAMESPACE: z.string().min(1).default('default'),
-  TEMPORAL_TASK_QUEUE: z.string().min(1).default('thet-temporal-dev-ignore'),
+  // Default matches backend/.env's canonical queue: a fallback must never dispatch onto a dead
+  // queue (runs stick to the queue configured when they START, so a stale default strands them).
+  TEMPORAL_TASK_QUEUE: z.string().min(1).default('thet-dev-graphflow'),
   TEMPORAL_API_KEY: z.string().optional(),
   GRAPHFLOW_DB: z.string().default('graphflow.sqlite3'),
   GRAPHFLOW_STORAGE: z.string().default('mock_s3_gcs'),

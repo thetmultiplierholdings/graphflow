@@ -38,7 +38,7 @@ describe('parseEnv', () => {
     const env = parseEnv({});
     expect(env.temporalAddress).toBe('localhost:7233');
     expect(env.temporalNamespace).toBe('default');
-    expect(env.temporalTaskQueue).toBe('thet-temporal-dev-ignore');
+    expect(env.temporalTaskQueue).toBe('thet-dev-graphflow');
     expect(env.temporalApiKey).toBeUndefined();
     expect(env.dbPath).toBe('graphflow.sqlite3');
     expect(env.storageRoot).toBe('mock_s3_gcs');

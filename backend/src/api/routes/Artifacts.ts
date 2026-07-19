@@ -1,6 +1,8 @@
 import { Buffer } from 'node:buffer';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
+import { canonicalBytes } from '../../domain/canonical/Canonical.js';
+import type { JsonValue } from '../../domain/json/JsonValue.js';
 import {
   artifactLineage,
   attach,
@@ -12,7 +14,7 @@ import {
   supplyArtifact,
 } from '../../infrastructure/db/Db.js';
 import { readPayload } from '../../infrastructure/storage/Storage.js';
-import { ValidationError } from '../../shared/errors/Errors.js';
+import { errorMessage, ValidationError } from '../../shared/errors/Errors.js';
 import type { ApiDeps } from '../Deps.js';
 import { withConn } from '../Deps.js';
 import {
@@ -79,6 +81,24 @@ async function readUploadParts(request: FastifyRequest): Promise<UploadParts> {
   return out;
 }
 
+// Questionnaire channel: the frontend is forbidden from producing canonical JSON, so with
+// canonical_json=true the answers are parsed and canonicalized HERE — a re-answered identical
+// questionnaire converges on the same artifact and revives downstream memo hits. Invalid JSON and
+// non-canonicalizable values (floats etc.) surface as 422.
+function canonicalizeIfRequested(parts: UploadParts, data: Uint8Array): { data: Uint8Array; mediaType: string } {
+  const flag = (parts.fields.get('canonical_json') ?? '').toLowerCase();
+  if (flag !== 'true' && flag !== '1') {
+    return { data, mediaType: parts.contentType ?? 'application/octet-stream' };
+  }
+  let parsed: JsonValue;
+  try {
+    parsed = JSON.parse(Buffer.from(data).toString('utf8')) as JsonValue;
+  } catch (e) {
+    throw new ValidationError(`canonical_json upload is not valid JSON: ${errorMessage(e)}`);
+  }
+  return { data: canonicalBytes(parsed), mediaType: 'application/json' };
+}
+
 export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): void {
   const r = app.withTypeProvider<ZodTypeProvider>();
 
@@ -114,7 +134,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
       if (missing.length > 0 || parts.data === null) {
         return reply.code(422).send({ detail: missing });
       }
-      const data = parts.data;
+      const { data, mediaType } = canonicalizeIfRequested(parts, parts.data);
       const kind = parts.fields.get('kind') ?? '';
 
       let workflowRunId: number | null = null;
@@ -154,11 +174,11 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
         }
         const supplied = supplyArtifact(conn, deps.storageRoot, engagementId, kind.trim(), data, {
           label,
-          mediaType: parts.contentType ?? 'application/octet-stream',
+          mediaType,
           createdBy: 'user',
         });
         if (workflowRunId !== null) {
-          attach(conn, workflowRunId, supplied.artifact_id, { source: 'user', addedBy: 'user' });
+          attach(conn, workflowRunId, supplied.artifact_id, { source: 'user', createdBy: 'user' });
         }
         return { artifact: artifactMeta(getArtifact(conn, supplied.artifact_id)), revived: supplied.existed };
       });
@@ -210,7 +230,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
     async (request): Promise<{ artifact: ArtifactMetaOut }> => {
       return withConn(deps, (conn) => {
         getArtifact(conn, request.params.artifact_id);
-        renameArtifact(conn, request.params.artifact_id, request.body.label);
+        renameArtifact(conn, request.params.artifact_id, request.body.label, 'user');
         return { artifact: artifactMeta(getArtifact(conn, request.params.artifact_id)) };
       });
     }

@@ -108,6 +108,53 @@ function encodeArgs(value: NodeArgValue): EncodedArgs {
   return { hashForm: value, transport: value, inputArtifactIds: [] };
 }
 
+// Collect every ArtifactHandle inside an argument value — single handles, arrays, and nested
+// containers — so the inputKinds check cannot be smuggled past by wrapping.
+function collectHandles(value: NodeArgValue, out: ArtifactHandle[]): void {
+  if (value instanceof ArtifactHandle) {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectHandles(item, out);
+    }
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const item of Object.values(value)) {
+      collectHandles(item, out);
+    }
+  }
+}
+
+// Declared input ports, enforced before anything is hashed: a param mapped to a kind accepts only
+// artifacts of that kind (single or list); a scalar param (null) accepts no artifacts. Absent
+// params (nulled by the caller) pass vacuously. Exported for unit tests — Ctx.node's happy path
+// requires a live activity proxy, but this guard is pure.
+export function enforceInputKinds(nd: NodeDef, argMap: Record<string, NodeArgValue>): void {
+  for (const p of nd.paramNames) {
+    const expected = nd.inputKinds[p] ?? null;
+    const handles: ArtifactHandle[] = [];
+    collectHandles(argMap[p] ?? null, handles);
+    if (expected === null) {
+      if (handles.length > 0) {
+        throw ApplicationFailure.nonRetryable(
+          `node ${nd.nodeId}: param '${p}' is declared scalar but received an artifact of kind '${handles[0]?.kind ?? ''}'`
+        );
+      }
+      continue;
+    }
+    for (const h of handles) {
+      if (h.kind !== expected) {
+        throw ApplicationFailure.nonRetryable(
+          `node ${nd.nodeId}: param '${p}' expects kind '${expected}' but received '${h.kind}'`
+        );
+      }
+    }
+  }
+}
+
 const short = proxyActivities<Acts>({ startToCloseTimeout: '30s' });
 const engineNode = proxyActivities<Acts>({
   startToCloseTimeout: '120s',
@@ -177,16 +224,15 @@ export class Ctx {
     return this.attachedOneOrNone(kind);
   }
 
-  // THE walk: input_hash over the canonical argument map, memo_key = H(code_hash || input_hash),
+  // THE walk: input_hash over the canonical argument map, memo_key = H(node_id ':' input_hash),
   // lookup -> hit: reuse; miss: execute (engine activity, or human-task workflow + poll).
   async node(def: NodeDef, args: Record<string, NodeArgValue>): Promise<ArtifactHandle> {
-    const registered = this.registry.tryNodeForWorkflow(this.workflowId, def.nodeId);
-    if (registered === undefined) {
+    const nd = this.registry.tryNodeForWorkflow(this.workflowId, def.nodeId);
+    if (nd === undefined) {
       throw ApplicationFailure.nonRetryable(
         `node '${def.nodeId}' is not registered for workflow '${this.workflowId}' (missing from its nodes list?)`
       );
     }
-    const nd = registered.def;
     const argMap: Record<string, NodeArgValue> = {};
     for (const [k, v] of Object.entries(args)) {
       if (!nd.paramNames.includes(k)) {
@@ -204,8 +250,9 @@ export class Ctx {
         argMap[p] = null;
       }
     }
+    enforceInputKinds(nd, argMap);
     const { hashForm, transport, inputArtifactIds } = encodeArgs(argMap);
-    const mk = memoKey(registered.codeHash, hashValue(hashForm));
+    const mk = memoKey(nd.nodeId, hashValue(hashForm));
 
     const hit = await short.memo_lookup(this.engagementId, mk);
     if (hit !== null) {

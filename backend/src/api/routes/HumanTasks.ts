@@ -66,8 +66,10 @@ export function registerHumanTaskRoutes(app: FastifyInstance, deps: ApiDeps): vo
       if (!taskId.startsWith(prefix)) {
         throw new NotFoundError('task not found');
       }
+      // The API attributes every submission to a user principal; the body carries the bare name.
+      // (A name may itself contain ':' — 'user:' prefixes verbatim, no parsing.)
       const ref = await deps.temporal.executeSubmit(taskId, {
-        reviewer: request.body.reviewer,
+        reviewer: `user:${request.body.reviewer}`,
         result: request.body.result,
       });
       return withConn(deps, (conn) => ({ artifact: artifactMeta(getArtifact(conn, ref.artifact_id)) }));

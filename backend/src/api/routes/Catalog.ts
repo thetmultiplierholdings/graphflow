@@ -16,7 +16,8 @@ function family(workflowId: string): { stem: string; version: number } {
 }
 
 // The highest (version, workflow_id) member of each family gets superseded_by: null; every other
-// member points at it. Derived purely from the workflow_id filename convention.
+// member points at it. Derived purely from the workflow_id naming convention (the id is the
+// workflow's folder name under src/workflows/).
 function supersededMap(workflowIds: readonly string[]): Record<string, string | null> {
   const families = new Map<string, { version: number; wid: string }[]>();
   for (const wid of workflowIds) {
@@ -48,15 +49,21 @@ export function registerCatalogRoutes(app: FastifyInstance, deps: ApiDeps): void
       workflows: snapshot.map((wf) => ({
         workflow_id: wf.workflow_id,
         display_name: wf.display_name,
-        task_queue: wf.task_queue,
+        created_at: wf.created_at,
+        updated_at: wf.updated_at,
         superseded_by: superseded[wf.workflow_id] ?? null,
-        kinds: wf.kinds.map((k) => ({ kind: k.kind, display_name: k.display_name, leaf: k.leaf !== 0 })),
+        kinds: wf.kinds.map((k) => ({
+          kind: k.kind,
+          display_name: k.display_name,
+          source: k.source,
+          leaf: k.leaf !== 0,
+        })),
         nodes: wf.nodes.map((n) => ({
           node_id: n.node_id,
           display_name: n.display_name,
           executor: n.executor,
           output_kind: n.output_kind,
-          code_hash: n.code_hash,
+          input_kinds: n.input_kinds,
         })),
       })),
     };

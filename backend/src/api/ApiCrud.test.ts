@@ -6,15 +6,16 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildRegistry } from '../domain/registry/Registry.js';
-import { CODE_HASHES } from '../generated/CodeHashes.js';
-import { attach, connect, initDb, publishCatalog } from '../infrastructure/db/Db.js';
+import { attach, connect, initDb, publishCatalog, recordCompletion } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import { NotFoundError, RuntimeError } from '../shared/errors/Errors.js';
 import { ALL_WORKFLOWS } from '../workflows/index.js';
 import { buildApp } from './App.js';
 import type { TemporalGateway } from './Deps.js';
 import type { CatalogOut, CatalogWorkflowOut, StatusOut, UploadOut } from './Schemas.js';
-import type { ArtifactMetaOut, EngagementOut, MemberOut, WorkspaceDetailOut } from './Serializers.js';
+import type { ArtifactMetaOut, EngagementOut, MemberOut, WorkspaceDetailOut, WorkspaceListOut } from './Serializers.js';
+
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/;
 
 // HTTP CRUD over the real app: embedded worker OFF and Temporal replaced by a stub gateway (no
 // route below touches Temporal except /status, which the stub answers with NOT_FOUND → idle).
@@ -57,10 +58,10 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     dbPath = join(scratch, `crud_${randomBytes(4).toString('hex')}.sqlite3`);
     storageRoot = join(scratch, 'store');
     const instance = initDb(dbPath);
-    const registry = buildRegistry(ALL_WORKFLOWS, CODE_HASHES);
+    const registry = buildRegistry(ALL_WORKFLOWS);
     const conn = connect(dbPath);
     try {
-      publishCatalog(conn, registry, TASK_QUEUE);
+      publishCatalog(conn, registry);
     } finally {
       conn.close();
     }
@@ -141,13 +142,15 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     };
   }
 
-  async function upload(
-    engagementId: number,
-    name: string,
-    data: Buffer,
-    kind: string,
-    opts: { label?: string; workflowRunId?: number; mediaType?: string } = {}
-  ): Promise<UploadOut> {
+  interface UploadOpts {
+    label?: string;
+    workflowRunId?: number;
+    mediaType?: string;
+    canonicalJson?: boolean;
+  }
+
+  // Raw variant for tests asserting rejections; `upload` wraps it with the happy-path 200 check.
+  async function uploadRaw(engagementId: number, name: string, data: Buffer, kind: string, opts: UploadOpts = {}) {
     const fields: Record<string, string> = { kind };
     if (opts.label !== undefined) {
       fields.label = opts.label;
@@ -155,13 +158,26 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     if (opts.workflowRunId !== undefined) {
       fields.workflow_run_id = String(opts.workflowRunId);
     }
+    if (opts.canonicalJson === true) {
+      fields.canonical_json = 'true';
+    }
     const body = multipartBody(fields, { filename: name, data, contentType: opts.mediaType ?? 'text/plain' });
-    const res = await app.inject({
+    return await app.inject({
       method: 'POST',
       url: `/engagements/${engagementId}/artifacts`,
       payload: body.payload,
       headers: body.headers,
     });
+  }
+
+  async function upload(
+    engagementId: number,
+    name: string,
+    data: Buffer,
+    kind: string,
+    opts: UploadOpts = {}
+  ): Promise<UploadOut> {
+    const res = await uploadRaw(engagementId, name, data, kind, opts);
     expect(res.statusCode).toBe(200);
     return res.json<UploadOut>();
   }
@@ -171,7 +187,7 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
   function engineAttach(workflowRunId: number, artifactId: number): void {
     const conn = connect(dbPath);
     try {
-      attach(conn, workflowRunId, artifactId, { source: 'engine', addedBy: 'engine' });
+      attach(conn, workflowRunId, artifactId, { source: 'engine', createdBy: 'engine' });
     } finally {
       conn.close();
     }
@@ -222,6 +238,9 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     expect(art.byte_size).toBe(data.length);
     expect(art.created_by).toBe('user');
     expect(art.payload_available).toBe(true);
+    // Derived provenance: an uploaded leaf kind carries its birth channel.
+    expect(art.origin).toBe('upload');
+    expect(art.produced_by_node_run).toBeNull();
     // ArtifactMeta never carries bytes.
     expect(art).not.toHaveProperty('payload');
 
@@ -285,6 +304,8 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
       workflowRunId: src.workflow_run_id,
     });
     const engineArt = await upload(eng.engagement_id, 'res.txt', Buffer.from('ENGINE RESULT'), 'ocr_txns');
+    // Hand-staging a computed kind is a legal supply species: origin derives to 'override'.
+    expect(engineArt.artifact.origin).toBe('override');
     engineAttach(src.workflow_run_id, engineArt.artifact.artifact_id);
     expect(await members(src.workflow_run_id)).toHaveLength(2);
 
@@ -298,6 +319,7 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     const eng = await createEngagement('patch-eng');
     const ws = await createWorkspace(eng.engagement_id, 'before');
     const up = await upload(eng.engagement_id, 'a.txt', Buffer.from('PATCH ME'), 'payment_slip');
+    expect(up.artifact.updated_by).toBeNull();
 
     const patched = await app.inject({
       method: 'PATCH',
@@ -305,7 +327,18 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
       payload: { label: 'renamed label' },
     });
     expect(patched.statusCode).toBe(200);
-    expect(patched.json<{ artifact: ArtifactMetaOut }>().artifact.label).toBe('renamed label');
+    const renamed = patched.json<{ artifact: ArtifactMetaOut }>().artifact;
+    expect(renamed.label).toBe('renamed label');
+    // A rename is a stamped update; creation provenance stays put.
+    expect(renamed.updated_by).toBe('user');
+    expect(renamed.updated_at).toMatch(ISO_RE);
+    expect(renamed.created_by).toBe('user');
+    expect(renamed.created_at).toBe(up.artifact.created_at);
+
+    // PATCH {} changes nothing and must not fake an update.
+    const noop = await app.inject({ method: 'PATCH', url: `/workflow-runs/${ws.workflow_run_id}`, payload: {} });
+    expect(noop.statusCode).toBe(200);
+    expect(noop.json<WorkspaceDetailOut>().updated_at).toBeNull();
 
     const wsPatch = await app.inject({
       method: 'PATCH',
@@ -315,6 +348,8 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     expect(wsPatch.statusCode).toBe(200);
     expect(wsPatch.json<WorkspaceDetailOut>().label).toBe('after');
     expect(wsPatch.json<WorkspaceDetailOut>().workflow_id).toBe('tax_demo_workflow_v2');
+    expect(wsPatch.json<WorkspaceDetailOut>().updated_by).toBe('user');
+    expect(wsPatch.json<WorkspaceDetailOut>().updated_at).toMatch(ISO_RE);
 
     const badPatch = await app.inject({
       method: 'PATCH',
@@ -339,6 +374,85 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     });
     expect(unarchived.statusCode).toBe(200);
     expect(unarchived.json<WorkspaceDetailOut>().archived_at).toBeNull();
+
+    // Archive is itself a stamped update — pinned on a workspace no PATCH has touched.
+    const ws2 = await createWorkspace(eng.engagement_id, 'archive-me');
+    expect(ws2.updated_at).toBeNull();
+    const archived2 = await app.inject({
+      method: 'POST',
+      url: `/workflow-runs/${ws2.workflow_run_id}/archive`,
+      payload: { archived: true },
+    });
+    expect(archived2.statusCode).toBe(200);
+    expect(archived2.json<WorkspaceDetailOut>().archived_at).not.toBeNull();
+    expect(archived2.json<WorkspaceDetailOut>().updated_by).toBe('user');
+    expect(archived2.json<WorkspaceDetailOut>().updated_at).toMatch(ISO_RE);
+  });
+
+  it('hygiene stamps on the wire: created_*/updated_* exposed, deleted_at never', async () => {
+    const eng = await createEngagement('hygiene-eng');
+    expect(eng.created_by).toBe('user');
+    expect(eng.created_at).toMatch(ISO_RE);
+    expect(eng.updated_by).toBeNull();
+    expect(eng.updated_at).toBeNull();
+    expect(eng).not.toHaveProperty('deleted_at');
+
+    const ws = await createWorkspace(eng.engagement_id, 'ws-hygiene');
+    expect(ws.created_by).toBe('user');
+    expect(ws.updated_at).toBeNull();
+    expect(ws).not.toHaveProperty('deleted_at');
+
+    const list = await app.inject({ method: 'GET', url: `/engagements/${eng.engagement_id}/workflow-runs` });
+    expect(list.statusCode).toBe(200);
+    const rows = list.json<WorkspaceListOut[]>();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ created_by: 'user', updated_at: null, user_docs: 0, engine_results: 0 });
+    expect(rows[0]).not.toHaveProperty('deleted_at');
+
+    const up = await upload(eng.engagement_id, 'h.txt', Buffer.from('HYGIENE'), 'payment_slip');
+    expect(up.artifact.updated_by).toBeNull();
+    expect(up.artifact.updated_at).toBeNull();
+    expect(up.artifact).not.toHaveProperty('deleted_at');
+
+    // Catalog workflows carry publish stamps; this suite publishes exactly once.
+    const catalog = (await app.inject({ method: 'GET', url: '/catalog' })).json<CatalogOut>();
+    expect(catalog.workflows.length).toBeGreaterThan(0);
+    for (const wf of catalog.workflows) {
+      expect(wf.created_at).toMatch(ISO_RE);
+      expect(wf.updated_at).toBeNull();
+    }
+  });
+
+  it('member wire keys carry both provenance levels; promotion keeps added_* and list position', async () => {
+    const eng = await createEngagement('alias-eng');
+    const ws = await createWorkspace(eng.engagement_id, 'ws-alias');
+    const a = await upload(eng.engagement_id, 'a.txt', Buffer.from('ALIAS-A'), 'brokerage_statement');
+    const b = await upload(eng.engagement_id, 'b.txt', Buffer.from('ALIAS-B'), 'payment_slip');
+    engineAttach(ws.workflow_run_id, a.artifact.artifact_id);
+    engineAttach(ws.workflow_run_id, b.artifact.artifact_id);
+
+    // The membership join must not clobber the artifact's own provenance: the uploader (created_by)
+    // and the attacher (added_by) arrive side by side.
+    const before = await members(ws.workflow_run_id);
+    expect(before.map((m) => m.artifact_id)).toEqual([a.artifact.artifact_id, b.artifact.artifact_id]);
+    expect(before[0].created_by).toBe('user');
+    expect(before[0].added_by).toBe('engine');
+    expect(before[0].added_at).toMatch(ISO_RE);
+
+    const promote = await app.inject({
+      method: 'POST',
+      url: `/workflow-runs/${ws.workflow_run_id}/attachments`,
+      payload: { artifact_id: a.artifact.artifact_id },
+    });
+    expect(promote.statusCode).toBe(204);
+
+    // Promotion flips source but keeps first-attach provenance AND first-attach ordering — the
+    // promoted member no longer jumps to the end of the list.
+    const after = await members(ws.workflow_run_id);
+    expect(after.map((m) => m.artifact_id)).toEqual([a.artifact.artifact_id, b.artifact.artifact_id]);
+    expect(after[0].source).toBe('user');
+    expect(after[0].added_by).toBe('engine');
+    expect(after[0].added_at).toBe(before[0].added_at);
   });
 
   it('catalog versioning invariant', async () => {
@@ -358,41 +472,172 @@ describe('API CRUD (fastify.inject over a scratch ledger, stub Temporal)', () =>
     expect(v1.superseded_by).toBe('tax_demo_workflow_v2');
     expect(v2.superseded_by).toBeNull();
 
-    // THE versioning invariant (locks in the hashWith=[TAX_RATE] fix): between v1 and v2 exactly
-    // calculate_tax and build_report re-hash; the other four nodes keep identical code hashes.
-    const expectedNodes = [
+    // THE versioning invariant under name identity: between v1 and v2 exactly calculate_tax and
+    // build_report changed behavior, so exactly those two carry new names; the other four keep
+    // v1's names (and with them their memoized answers).
+    const nodeIds = (wf: CatalogWorkflowOut): string[] => wf.nodes.map((n) => n.node_id).sort();
+    expect(nodeIds(v1)).toEqual([
       'append_to_master',
       'build_report',
       'calculate_tax',
       'ocr_brokerage_statement',
       'ocr_payment_slip',
       'verify_txns',
-    ];
-    const nodeIds = (wf: CatalogWorkflowOut): string[] => wf.nodes.map((n) => n.node_id).sort();
-    expect(nodeIds(v1)).toEqual(expectedNodes);
-    expect(nodeIds(v2)).toEqual(expectedNodes);
+    ]);
+    expect(nodeIds(v2)).toEqual([
+      'append_to_master',
+      'build_report_v2',
+      'calculate_tax_v2',
+      'ocr_brokerage_statement',
+      'ocr_payment_slip',
+      'verify_txns',
+    ]);
 
-    const hashOf = (wf: CatalogWorkflowOut, nodeId: string): string => {
-      const node = wf.nodes.find((n) => n.node_id === nodeId);
-      if (node === undefined) {
-        throw new RuntimeError(`node ${nodeId} missing from ${wf.workflow_id}`);
-      }
-      return node.code_hash;
-    };
-    const shared = expectedNodes.filter((nodeId) => hashOf(v1, nodeId) === hashOf(v2, nodeId));
-    const changed = expectedNodes.filter((nodeId) => hashOf(v1, nodeId) !== hashOf(v2, nodeId));
-    expect(shared).toEqual(['append_to_master', 'ocr_brokerage_statement', 'ocr_payment_slip', 'verify_txns']);
-    expect(changed).toEqual(['build_report', 'calculate_tax']);
+    // Dispatch metadata is gone from the catalog row; node rows carry no code hash.
+    expect(v1).not.toHaveProperty('task_queue');
+    expect(v1).not.toHaveProperty('temporal_workflow_type');
+    for (const node of [...v1.nodes, ...v2.nodes]) {
+      expect(node).not.toHaveProperty('code_hash');
+    }
+
+    // Kinds carry the authored source; leaf stays derived (no producer among the workflow's nodes);
+    // order is declaration order (the mirrors are rewritten per publish).
+    expect(v2.kinds.map((k) => k.kind)).toEqual([
+      'brokerage_statement',
+      'payment_slip',
+      'ocr_txns',
+      'verified_txns',
+      'master_txn_list',
+      'residency_answers',
+      'tax_calc',
+      'final_report',
+    ]);
+    const kindByName = new Map(v2.kinds.map((k) => [k.kind, k]));
+    expect(kindByName.get('brokerage_statement')).toMatchObject({ source: 'upload', leaf: true });
+    expect(kindByName.get('residency_answers')).toMatchObject({
+      source: 'questionnaire',
+      leaf: true,
+      display_name: 'Residency questionnaire',
+    });
+    expect(kindByName.get('ocr_txns')).toMatchObject({ source: 'computed', leaf: false });
+    // Kinds declared without a display fall back to the kind string — never an empty badge.
+    expect(kindByName.get('ocr_txns')?.display_name).toBe('ocr_txns');
+    expect(v1.kinds.map((k) => k.kind)).not.toContain('residency_answers');
+
+    // input_kinds publishes the declared dataflow: param -> consumed kind (null = scalar).
+    const nodeOf = (wf: CatalogWorkflowOut, nodeId: string) => wf.nodes.find((n) => n.node_id === nodeId);
+    expect(nodeOf(v1, 'calculate_tax')?.input_kinds).toEqual({ master: 'master_txn_list' });
+    expect(nodeOf(v2, 'calculate_tax_v2')?.input_kinds).toEqual({
+      master: 'master_txn_list',
+      residency: 'residency_answers',
+    });
+    expect(nodeOf(v1, 'build_report')?.input_kinds).toEqual({
+      statements: 'brokerage_statement',
+      slips: 'payment_slip',
+      master: 'master_txn_list',
+      calc: 'tax_calc',
+    });
+    // input_kinds keys arrive in declared param order (node_input_kinds is rewritten per publish).
+    expect(Object.keys(nodeOf(v1, 'build_report')?.input_kinds ?? {})).toEqual([
+      'statements',
+      'slips',
+      'master',
+      'calc',
+    ]);
 
     for (const wf of catalog.workflows) {
       expect(wf.display_name).toBeTruthy();
       for (const kind of wf.kinds) {
         expect(kind.display_name).toBeTruthy();
+        expect(['upload', 'questionnaire', 'email', 'computed']).toContain(kind.source);
       }
       for (const node of wf.nodes) {
         expect(['engine', 'human']).toContain(node.executor);
       }
     }
+  });
+
+  it('upload of a kind absent from the vocabulary is rejected', async () => {
+    const eng = await createEngagement('guard-eng');
+    const res = await uploadRaw(eng.engagement_id, 'x.txt', Buffer.from('X'), 'never_published_kind');
+    expect(res.statusCode).toBe(422);
+    expect(res.json<{ detail: string }>().detail).toBe(
+      "kind 'never_published_kind' is not in the published kind vocabulary"
+    );
+  });
+
+  it('canonical_json uploads converge: same answers, different formatting, one artifact', async () => {
+    const eng = await createEngagement('questionnaire-eng');
+    const first = await upload(
+      eng.engagement_id,
+      'answers.json',
+      Buffer.from('{"country": "SG", "resident": true}'),
+      'residency_answers',
+      { canonicalJson: true, mediaType: 'application/json' }
+    );
+    expect(first.revived).toBe(false);
+    expect(first.artifact.origin).toBe('questionnaire');
+    expect(first.artifact.media_type).toBe('application/json');
+
+    // Re-answering identically — different key order and whitespace — lands on the SAME artifact
+    // (the revive path), which is what revives downstream memo hits.
+    const again = await upload(
+      eng.engagement_id,
+      'answers-2.json',
+      Buffer.from('{\n  "resident": true,\n  "country": "SG"\n}'),
+      'residency_answers',
+      { canonicalJson: true, mediaType: 'application/json' }
+    );
+    expect(again.revived).toBe(true);
+    expect(again.artifact.artifact_id).toBe(first.artifact.artifact_id);
+
+    const invalid = await uploadRaw(eng.engagement_id, 'bad.json', Buffer.from('{not json'), 'residency_answers', {
+      canonicalJson: true,
+    });
+    expect(invalid.statusCode).toBe(422);
+    expect(invalid.json<{ detail: string }>().detail).toContain('not valid JSON');
+
+    const floats = await uploadRaw(eng.engagement_id, 'f.json', Buffer.from('{"rate": 0.24}'), 'residency_answers', {
+      canonicalJson: true,
+    });
+    expect(floats.statusCode).toBe(422);
+    expect(floats.json<{ detail: string }>().detail).toContain('float');
+  });
+
+  it('a produced artifact derives origin=produced and its producer via lineage', async () => {
+    const eng = await createEngagement('produced-eng');
+    // Executing a workflow is the integration suite's job; here the completion transaction is
+    // driven directly against the scratch ledger, then read back through the API.
+    const conn = connect(dbPath);
+    let artifactId: number;
+    try {
+      const { ref, fresh } = recordCompletion(conn, storageRoot, {
+        engagementId: eng.engagement_id,
+        workflowRunId: null,
+        workflowId: 'tax_demo_workflow',
+        nodeId: 'ocr_brokerage_statement',
+        memoKey: 'a'.repeat(64),
+        outputKind: 'ocr_txns',
+        payload: Buffer.from('{"doc_kind":"brokerage_statement","transactions":[]}'),
+        mediaType: 'application/json',
+        createdBy: 'engine',
+        temporalId: 'wf/run/act',
+        inputArtifactIds: [],
+      });
+      expect(fresh).toBe(true);
+      artifactId = ref.artifact_id;
+    } finally {
+      conn.close();
+    }
+    const res = await app.inject({ method: 'GET', url: `/artifacts/${artifactId}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{
+      artifact: ArtifactMetaOut;
+      produced_by: { node_run_id: number; node_id: string } | null;
+    }>();
+    expect(body.artifact.origin).toBe('produced');
+    expect(body.artifact.produced_by_node_run).toBe(body.produced_by?.node_run_id);
+    expect(body.produced_by?.node_id).toBe('ocr_brokerage_statement');
   });
 
   it('artifact content roundtrip and 404', async () => {

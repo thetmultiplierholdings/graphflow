@@ -10,7 +10,7 @@ import type { Env } from '../infrastructure/env/Env.js';
 import { RuntimeError, throwIfStandardError } from '../shared/errors/Errors.js';
 import { createActivities } from './Activities.js';
 import type { RunInput } from './Context.js';
-import { humanTaskIdPrefix, runIdPrefix, runWorkflowId } from './Ids.js';
+import { humanTaskIdPrefix, RUN_WORKFLOW_TYPE, runIdPrefix, runWorkflowId } from './Ids.js';
 
 // Node-side runtime: Temporal Cloud client, the worker, and the execute-workspace path.
 // Workflow-id helpers live in Ids.ts (shared with activities, API routes, and the CLI).
@@ -107,8 +107,6 @@ interface WorkspaceStart {
   workflowId: string;
   attachments: ArtifactRef[];
   instance: string;
-  temporalWorkflowType: string;
-  taskQueue: string;
   declaredKinds: string[];
 }
 
@@ -118,10 +116,10 @@ function loadWorkspaceStart(dbPath: string, workflowRunId: number): WorkspaceSta
     const ws = getWorkspace(conn, workflowRunId);
     const attachments = userAttachments(conn, workflowRunId);
     const instance = instanceId(conn);
+    // The catalog carries no dispatch metadata anymore, but membership is still the guard: a
+    // workspace pointing at an unpublished workflow must fail here, not hang in Temporal.
     const wfRow = conn
-      .prepare<[string], { temporal_workflow_type: string; task_queue: string }>(
-        'SELECT * FROM workflows WHERE workflow_id=?'
-      )
+      .prepare<[string], { workflow_id: string }>('SELECT workflow_id FROM workflows WHERE workflow_id=?')
       .get(ws.workflow_id);
     if (wfRow === undefined) {
       throw new RuntimeError(`workflow '${ws.workflow_id}' is not in the catalog (run \`init\` first)`);
@@ -135,8 +133,6 @@ function loadWorkspaceStart(dbPath: string, workflowRunId: number): WorkspaceSta
       workflowId: ws.workflow_id,
       attachments,
       instance,
-      temporalWorkflowType: wfRow.temporal_workflow_type,
-      taskQueue: wfRow.task_queue,
       declaredKinds,
     };
   } finally {
@@ -156,6 +152,7 @@ export async function startWorkspace(
   client: Client,
   dbPath: string,
   workflowRunId: number,
+  taskQueue: string,
   supersede = false
 ): Promise<WorkflowHandle> {
   const start = loadWorkspaceStart(dbPath, workflowRunId);
@@ -195,12 +192,14 @@ export async function startWorkspace(
     declared_kinds: start.declaredKinds,
     attachments: start.attachments,
   };
-  // Workflow type and task queue come from the CATALOG row, not from code — old workspaces keep
-  // their referent.
-  return client.workflow.start(start.temporalWorkflowType, {
+  // Dispatch is the constant workflow type on the caller's (env) task queue — the same value the
+  // recovery sweeps filter on, so a run can never start somewhere the sweeps don't look. A retired
+  // workflow id fails loud inside GraphflowRun ("not registered on this worker") instead of
+  // hanging on a stale queue.
+  return client.workflow.start(RUN_WORKFLOW_TYPE, {
     args: [inp],
     workflowId: wfId,
-    taskQueue: start.taskQueue,
+    taskQueue,
     workflowIdConflictPolicy: 'USE_EXISTING',
   });
 }

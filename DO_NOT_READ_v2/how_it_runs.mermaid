@@ -1,0 +1,79 @@
+sequenceDiagram
+    autonumber
+
+    box rgb(235, 235, 235) USER
+        participant U as Browser
+    end
+    box rgb(214, 232, 255) OUR MAIN SERVER - the API process that dispatches and long-polls results back
+        participant API as API route<br/>(WorkflowRuns.ts)
+    end
+    box rgb(240, 240, 218) TEMPORAL CLOUD - their machines. Durable history, queues, timers, retries. Runs NONE of our code, never touches our DB
+        participant TC as Temporal Cloud
+    end
+    box rgb(255, 228, 209) OUR TEMPORAL WORKER - runs workflow sandbox + activities. May be the same physical box as the API (GRAPHFLOW_EMBED_WORKER=1)
+        participant WF as Workflow sandbox<br/>(GraphflowRun / Ctx)
+        participant ACT as Activities<br/>(memo_lookup, run_engine_node, ...)
+    end
+    box rgb(220, 244, 220) OUR DISK
+        participant DB as SQLite ledger +<br/>payload files
+    end
+
+    U->>API: POST /workflow-runs/42/execute
+    API->>DB: read workspace 42 + user attachments (the snapshot)
+    API->>TC: gRPC: describe wfrun-abc-42 (open run? snapshot changed? supersede?)
+    API->>TC: gRPC: workflow.start("GraphflowRun", id=wfrun-abc-42, queue=q, USE_EXISTING)
+    Note over TC: execution durably recorded.<br/>Nothing of ours has executed yet.
+    API-->>U: 202 { temporal_workflow_id }
+    Note over API: our main server is DONE dispatching.<br/>From here it only long-polls results back (SSE pump, bottom).
+
+    WF->>TC: worker long-polls queue q
+    TC-->>WF: WORKFLOW task
+    Note over WF: >>> our WORKFLOW code begins here <<<<br/>GraphflowRun(inp) - deterministic jail: no I/O, no DB, no clock.<br/>ctx.node(): validate args, null-fill absent params,<br/>encode artifacts as {$artifact: content-hash},<br/>memo_key = sha256(node identity + canonical-args hash) - pure JS.
+    WF->>TC: await memo_lookup(...) is NOT a call:<br/>emits ScheduleActivity command, workflow PARKS
+    TC-->>ACT: ACTIVITY task memo_lookup (via worker long-poll)
+    Note over ACT: >>> our ACTIVITY code begins here <<<
+    ACT->>DB: SELECT ... WHERE engagement_id=? AND memo_key=?  (check #1's read)
+    DB-->>ACT: ref or null
+    ACT-->>TC: result appended to durable history
+    TC-->>WF: WORKFLOW task - resume at the awaited line<br/>(warm in memory, or REPLAY from history: same state either way)
+
+    alt CACHE HIT
+        WF->>TC: schedule attach_artifact - parks
+        TC-->>ACT: activity task
+        ACT->>DB: INSERT workspace membership ... ON CONFLICT DO NOTHING
+        ACT-->>TC: done
+        TC-->>WF: resume: memo_hits.push(node). NODE BODY NEVER RAN.
+    else CACHE MISS - engine node
+        WF->>TC: schedule run_engine_node(NodeRequest) - parks
+        TC-->>ACT: activity task
+        ACT->>DB: memoLookup again (check #2: activity-retry guard)
+        ACT->>DB: read input payloads from storage
+        Note over ACT: def.run(args) - THE NODE BODY.<br/>The only place it ever executes.
+        ACT->>DB: recordCompletion: BEGIN IMMEDIATE, memo check #3,<br/>INSERT artifact (ON CONFLICT DO NOTHING),<br/>INSERT node_run + node_run_inputs, attach, COMMIT.<br/>UNIQUE(engagement, memo_key) is the final tiebreak.
+        ACT-->>TC: { ref, fresh: true }
+        TC-->>WF: resume: executed.push(node)
+    else CACHE MISS - human node
+        WF->>TC: schedule ensure_human_task - parks
+        TC-->>ACT: activity task
+        ACT->>TC: workflow.start("GraphflowHumanTask", id=node-abc-7-memoKey, USE_EXISTING)
+        ACT-->>TC: task workflow id
+        loop until a reviewer answers (the answer lands via record_human_completion -> same recordCompletion)
+            WF->>TC: await sleep(1s -> 30s cap): a DURABLE TIMER in Temporal Cloud,<br/>not a thread on our box - our machine may reboot meanwhile
+            TC-->>WF: timer fired
+            WF->>TC: schedule memo_lookup - parks
+            TC-->>ACT: activity task
+            ACT->>DB: SELECT by memo_key
+            ACT-->>TC: ref or null
+            TC-->>WF: resume
+        end
+    end
+
+    Note over WF: ...repeat for every ctx.node() in the workflow walk...
+    WF-->>TC: GraphflowRun returns Summary { executed, memo_hits, human_waits }
+    Note over TC: the Summary lives ONLY in the execution result and history.<br/>It is never written to SQLite.
+
+    loop every ~1s from the 202 until finished or failed
+        API->>TC: gRPC: describe + query("progress")
+        TC-->>API: status + live Summary snapshot
+        API-->>U: SSE frame (progress / finished / failed)
+    end

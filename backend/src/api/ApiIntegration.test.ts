@@ -12,7 +12,6 @@ import type { JsonValue } from '../domain/json/JsonValue.js';
 import { JsonValueSchema } from '../domain/json/JsonValue.js';
 import { mulDecimals, quantize2HalfUp, sumDecimals } from '../domain/money/DecimalString.js';
 import { buildRegistry } from '../domain/registry/Registry.js';
-import { CODE_HASHES } from '../generated/CodeHashes.js';
 import { connect, initDb, publishCatalog } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import { parseEnv } from '../infrastructure/env/Env.js';
@@ -208,10 +207,10 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       };
 
       instance = initDb(dbPath);
-      const registry = buildRegistry(ALL_WORKFLOWS, CODE_HASHES);
+      const registry = buildRegistry(ALL_WORKFLOWS);
       const conn = connect(dbPath);
       try {
-        publishCatalog(conn, registry, taskQueue);
+        publishCatalog(conn, registry);
       } finally {
         conn.close();
       }
@@ -524,7 +523,8 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       for (const t of tasks) {
         const answer = await approveTask(t);
         expect(answer.kind).toBe('verified_txns');
-        expect(answer.created_by).toBe('Test Reviewer');
+        // The API wraps the submitted bare name as a 'user:*' principal.
+        expect(answer.created_by).toBe('user:Test Reviewer');
       }
 
       // 5. run completes; the report's TOTAL and TAX DUE are exact

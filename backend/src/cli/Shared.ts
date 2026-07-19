@@ -1,7 +1,6 @@
 import type { Client } from '@temporalio/client';
 import type { Registry } from '../domain/registry/Registry.js';
 import { buildRegistry } from '../domain/registry/Registry.js';
-import { CODE_HASHES } from '../generated/CodeHashes.js';
 import { connect, initDb, publishCatalog } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import type { Summary } from '../temporal/Context.js';
@@ -16,14 +15,14 @@ export const out = (line: string): void => {
 export const quotedList = (items: readonly string[]): string => `[${items.map((i) => `'${i}'`).join(', ')}]`;
 
 export function buildCliRegistry(): Registry {
-  return buildRegistry(ALL_WORKFLOWS, CODE_HASHES);
+  return buildRegistry(ALL_WORKFLOWS);
 }
 
 export function publish(env: Env): void {
   const registry = buildCliRegistry();
   const conn = connect(env.dbPath);
   try {
-    for (const line of publishCatalog(conn, registry, env.temporalTaskQueue)) {
+    for (const line of publishCatalog(conn, registry)) {
       out(`  [catalog] ${line}`);
     }
   } finally {
@@ -38,8 +37,13 @@ export function cmdInit(env: Env): void {
 }
 
 // CLI path of execute_workspace: start (or attach to) the run and await its Ctx summary.
-export async function executeWorkspace(client: Client, dbPath: string, workflowRunId: number): Promise<Summary> {
-  const handle = await startWorkspace(client, dbPath, workflowRunId, false);
+export async function executeWorkspace(
+  client: Client,
+  dbPath: string,
+  workflowRunId: number,
+  taskQueue: string
+): Promise<Summary> {
+  const handle = await startWorkspace(client, dbPath, workflowRunId, taskQueue, false);
   const summary: Summary = await handle.result();
   return summary;
 }

@@ -65,8 +65,11 @@
   },
   "overrides": [
     {
-      // The filename IS the workflow version (workflow_id == filename stem, snake_case).
-      "includes": ["src/workflows/*.ts"],
+      // The folder IS the workflow version (workflow_id == folder name, snake_case), and node
+      // files are named after their node_id (also snake_case): nodes_shared/<node_id>.ts and
+      // <workflow_id>/nodes_special/<node_id>.ts, next to workflow.ts / enums.ts / helpers.ts.
+      // snake_case stays allowed for everything under src/workflows/.
+      "includes": ["src/workflows/**"],
       "linter": {
         "rules": {
           "style": {
@@ -74,7 +77,7 @@
               "level": "error",
               "options": {
                 "requireAscii": true,
-                "filenameCases": ["snake_case", "PascalCase"],
+                "filenameCases": ["snake_case", "PascalCase", "kebab-case"],
                 "strictCase": false
               }
             }

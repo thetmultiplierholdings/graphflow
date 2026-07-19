@@ -1,19 +1,33 @@
 import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { ArtifactRef } from '../../domain/artifact/ArtifactRef.js';
-import { leafKinds, type Registry } from '../../domain/registry/Registry.js';
+import { assertPrincipal } from '../../domain/principal/Principal.js';
+import { type Registry, validateCatalog } from '../../domain/registry/Registry.js';
 import { isSqliteConstraintError, NotFoundError, RuntimeError, ValidationError } from '../../shared/errors/Errors.js';
-import { RUN_WORKFLOW_TYPE } from '../../temporal/Ids.js';
 import { readPayload, writePayload } from '../storage/Storage.js';
 
-// SQLite ledger + workspace + catalog mirror. Postgres-isms translated to SQLite:
-//   - deferred circular FK pair (artifacts.produced_by_node_run <-> node_runs.output_artifact_id)
-//     via DEFERRABLE INITIALLY DEFERRED, enforced because every connection sets PRAGMA foreign_keys=ON;
-//   - node_run_id pre-allocation via MAX+1 inside BEGIN IMMEDIATE (SQLite is single-writer, race-free);
-//   - ON CONFLICT DO NOTHING for the idempotent completion transaction.
-// LEDGER (artifacts, node_runs, node_run_inputs) is insert-only; the one mutable ledger column is
-// artifacts.label. WORKSPACE rows are editable; detaching a workflow_run_artifacts row is the only
-// DELETE in the system.
+// SQLite ledger + workspace + catalog mirror.
+//   - ON CONFLICT DO NOTHING powers the idempotent completion transaction (convergence: identical
+//     bytes under one kind land on one row);
+//   - artifact provenance is DERIVED, never stored: the artifact_facts view computes the producer
+//     (earliest node_run whose output_artifact_id points at the row) and the origin class from
+//     the kind's authored source — nothing stored can diverge from lineage.
+// LEDGER (artifacts, node_runs, node_run_inputs) is insert-only; the mutable ledger columns are
+// artifacts.label and its updated_by/updated_at stamps. WORKSPACE rows are editable; detaching a
+// workflow_run_artifacts row is the only user-facing DELETE (the publish transaction rewriting the
+// workflow_kinds/node_input_kinds mirrors is the only other).
+//
+// Hygiene block conventions (tiered per table — schema.dbml carries the full rationale):
+//   - created_by/created_at NOT NULL where present; convergence (ON CONFLICT DO NOTHING) keeps the
+//     FIRST filer's values.
+//   - updated_by/updated_at nullable; NULL means never updated. Every UPDATE statement must stamp
+//     them. The idempotent write paths (promote upsert, publish upserts) are guarded so a no-op
+//     never stamps; the request-driven UPDATEs (rename, workspace PATCH/archive) stamp per
+//     request — resubmitting an identical value re-stamps, matching archived_at's behavior.
+//   - deleted_at is dormant: always NULL, no reader filters on it — reserved for a future soft
+//     delete. workflow_runs.archived_at stays a separate, reversible domain flag.
+//   - actor columns hold principals '<type>[:<name>]' (domain/principal/Principal.ts), asserted at
+//     every write boundary.
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -24,21 +38,31 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS engagements (
   engagement_id INTEGER PRIMARY KEY,
   label TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_by TEXT,
+  updated_at TEXT,
+  deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workflows (
   workflow_id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
-  temporal_workflow_type TEXT NOT NULL,
-  task_queue TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kinds (
+  kind TEXT PRIMARY KEY,
+  source TEXT NOT NULL CHECK (source IN ('upload','questionnaire','email','computed')),
+  display_name TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workflow_kinds (
   workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id),
-  kind TEXT NOT NULL,
-  leaf INTEGER NOT NULL DEFAULT 1,
-  display_name TEXT,
+  kind TEXT NOT NULL REFERENCES kinds(kind),
   PRIMARY KEY (workflow_id, kind)
 );
 
@@ -46,25 +70,36 @@ CREATE TABLE IF NOT EXISTS nodes (
   workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id),
   node_id TEXT NOT NULL,
   executor TEXT NOT NULL CHECK (executor IN ('engine','human')),
-  output_kind TEXT NOT NULL,
+  output_kind TEXT NOT NULL REFERENCES kinds(kind),
   display_name TEXT,
-  code_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT,
   PRIMARY KEY (workflow_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS node_input_kinds (
+  workflow_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  param TEXT NOT NULL,
+  kind TEXT REFERENCES kinds(kind),
+  PRIMARY KEY (workflow_id, node_id, param),
+  FOREIGN KEY (workflow_id, node_id) REFERENCES nodes(workflow_id, node_id)
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
   artifact_id INTEGER PRIMARY KEY,
   engagement_id INTEGER NOT NULL REFERENCES engagements(engagement_id),
   hash TEXT NOT NULL,
-  kind TEXT NOT NULL,
+  kind TEXT NOT NULL REFERENCES kinds(kind),
   label TEXT,
   media_type TEXT NOT NULL,
   byte_size INTEGER NOT NULL,
   payload_ref TEXT,
-  produced_by_node_run INTEGER
-    REFERENCES node_runs(node_run_id) DEFERRABLE INITIALLY DEFERRED,
   created_by TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  updated_by TEXT,
+  updated_at TEXT,
+  deleted_at TEXT,
   UNIQUE (engagement_id, kind, hash)
 );
 CREATE INDEX IF NOT EXISTS idx_browse ON artifacts (engagement_id, kind, created_at);
@@ -74,11 +109,11 @@ CREATE TABLE IF NOT EXISTS node_runs (
   engagement_id INTEGER NOT NULL REFERENCES engagements(engagement_id),
   workflow_id TEXT NOT NULL,
   node_id TEXT NOT NULL,
-  code_hash TEXT NOT NULL,
   memo_key TEXT NOT NULL,
-  output_artifact_id INTEGER NOT NULL
-    REFERENCES artifacts(artifact_id) DEFERRABLE INITIALLY DEFERRED,
+  output_artifact_id INTEGER NOT NULL REFERENCES artifacts(artifact_id),
   temporal_id TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
   UNIQUE (engagement_id, memo_key),
   FOREIGN KEY (workflow_id, node_id) REFERENCES nodes(workflow_id, node_id)
 );
@@ -99,7 +134,10 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   copied_from_workflow_run INTEGER REFERENCES workflow_runs(workflow_run_id),
   archived_at TEXT,
   created_by TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  updated_by TEXT,
+  updated_at TEXT,
+  deleted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_workspaces ON workflow_runs (engagement_id, created_at);
 
@@ -107,17 +145,40 @@ CREATE TABLE IF NOT EXISTS workflow_run_artifacts (
   workflow_run_id INTEGER NOT NULL REFERENCES workflow_runs(workflow_run_id),
   artifact_id INTEGER NOT NULL REFERENCES artifacts(artifact_id),
   source TEXT NOT NULL CHECK (source IN ('user','engine')),
-  added_by TEXT NOT NULL,
-  added_at TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_by TEXT,
+  updated_at TEXT,
   PRIMARY KEY (workflow_run_id, artifact_id)
 );
 CREATE INDEX IF NOT EXISTS idx_impact ON workflow_run_artifacts (artifact_id);
+
+-- READ MODEL: derived provenance. produced_by_node_run = earliest run whose output points here
+-- (several runs can converge on one artifact via ON CONFLICT DO NOTHING); origin = 'produced'
+-- when such a run exists, else 'override' for a hand-supplied computed kind, else the kind's
+-- authored birth channel. Writers stay on base tables.
+CREATE VIEW IF NOT EXISTS artifact_facts AS
+SELECT
+  a.*,
+  (SELECT MIN(nr.node_run_id) FROM node_runs nr WHERE nr.output_artifact_id = a.artifact_id)
+    AS produced_by_node_run,
+  CASE
+    WHEN EXISTS (SELECT 1 FROM node_runs nr WHERE nr.output_artifact_id = a.artifact_id)
+      THEN 'produced'
+    WHEN k.source = 'computed' THEN 'override'
+    ELSE k.source
+  END AS origin
+FROM artifacts a JOIN kinds k ON k.kind = a.kind;
 `;
 
 export interface EngagementRow {
   engagement_id: number;
   label: string;
+  created_by: string;
   created_at: string;
+  updated_by: string | null;
+  updated_at: string | null;
+  deleted_at: string | null;
 }
 
 export interface ArtifactRow {
@@ -129,9 +190,22 @@ export interface ArtifactRow {
   media_type: string;
   byte_size: number;
   payload_ref: string | null;
-  produced_by_node_run: number | null;
   created_by: string;
   created_at: string;
+  updated_by: string | null;
+  updated_at: string | null;
+  deleted_at: string | null;
+}
+
+// How the artifact came to exist — derived by the artifact_facts view, never stored. 'produced'
+// wins over everything (a producing run exists); 'override' is a hand-supplied computed kind;
+// the rest are the kind's authored birth channel.
+export type ArtifactOrigin = 'produced' | 'upload' | 'questionnaire' | 'email' | 'override';
+
+// A row of the artifact_facts view: the base artifact columns plus derived provenance.
+export interface ArtifactFactsRow extends ArtifactRow {
+  produced_by_node_run: number | null;
+  origin: ArtifactOrigin;
 }
 
 export interface WorkflowRunRow {
@@ -143,6 +217,9 @@ export interface WorkflowRunRow {
   archived_at: string | null;
   created_by: string;
   created_at: string;
+  updated_by: string | null;
+  updated_at: string | null;
+  deleted_at: string | null;
 }
 
 export interface WorkspaceListRow extends WorkflowRunRow {
@@ -155,10 +232,11 @@ export interface NodeRunRow {
   engagement_id: number;
   workflow_id: string;
   node_id: string;
-  code_hash: string;
   memo_key: string;
   output_artifact_id: number;
   temporal_id: string;
+  created_by: string;
+  created_at: string;
 }
 
 export interface NodeRunWithInputs extends NodeRunRow {
@@ -171,7 +249,7 @@ export interface SuppliedArtifact extends ArtifactRef {
 
 export interface WorkspaceArtifact extends ArtifactRef {
   source: 'user' | 'engine';
-  produced: boolean;
+  origin: ArtifactOrigin;
 }
 
 export interface CompletionInput {
@@ -179,7 +257,6 @@ export interface CompletionInput {
   workflowRunId: number | null;
   workflowId: string;
   nodeId: string;
-  codeHash: string;
   memoKey: string;
   outputKind: string;
   payload: Uint8Array;
@@ -208,6 +285,8 @@ export interface ArtifactLineage {
 
 export interface CatalogKindEntry {
   kind: string;
+  source: string;
+  // Derived, not stored: 1 iff no node of the workflow produces the kind (SQLite int-as-boolean).
   leaf: number;
   display_name: string;
 }
@@ -217,21 +296,21 @@ export interface CatalogNodeEntry {
   executor: string;
   output_kind: string;
   display_name: string | null;
-  code_hash: string;
+  input_kinds: Record<string, string | null>;
 }
 
 export interface CatalogWorkflow {
   workflow_id: string;
   display_name: string;
-  temporal_workflow_type: string;
-  task_queue: string;
+  created_at: string;
+  updated_at: string | null;
   kinds: CatalogKindEntry[];
   nodes: CatalogNodeEntry[];
 }
 
-// UTC timestamps at seconds precision with a +00:00 offset (NOT Z, NOT millis). All
-// created_at/added_at columns and the ORDER BY created_at read models depend on this format
-// ordering lexicographically.
+// UTC timestamps at seconds precision with a +00:00 offset (NOT Z, NOT millis). Every timestamp
+// column (created_at/updated_at/archived_at/deleted_at) and the ORDER BY created_at read models
+// depend on this format ordering lexicographically.
 export function nowIso(): string {
   return `${new Date().toISOString().slice(0, 19)}+00:00`;
 }
@@ -301,65 +380,82 @@ const MEMO_LOOKUP_SQL = `
 const SELECT_ARTIFACT_BY_IDENTITY_SQL = 'SELECT * FROM artifacts WHERE engagement_id=? AND kind=? AND hash=?';
 
 const ATTACH_ENGINE_SQL = `
-  INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, added_by, added_at)
+  INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, created_by, created_at)
   VALUES (?,?,?,?,?) ON CONFLICT(workflow_run_id, artifact_id) DO NOTHING`;
 
+// Promotion flips source and stamps updated_* with the promoter; created_* (who first attached,
+// and when) survives. The WHERE guard makes a user→user re-attach a true no-op instead of a fake
+// update — updated_* may only record a real change.
 const ATTACH_PROMOTE_SQL = `
-  INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, added_by, added_at)
+  INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, created_by, created_at)
   VALUES (?,?,?,?,?) ON CONFLICT(workflow_run_id, artifact_id) DO UPDATE SET
-  source='user', added_by=excluded.added_by, added_at=excluded.added_at`;
+  source='user', updated_by=excluded.created_by, updated_at=excluded.created_at
+  WHERE workflow_run_artifacts.source='engine'`;
 
 const INPUTS_FOR_RUN_SQL = 'SELECT artifact_id FROM node_run_inputs WHERE node_run_id=? ORDER BY artifact_id';
 
 // ---------- catalog ----------
 
-// CI-publish the code registry into the catalog mirror (upsert, never delete).
-export function publishCatalog(conn: Database.Database, registry: Registry, taskQueue: string): string[] {
+// CI-publish the code registry into the catalog mirror. kinds/workflows/nodes are upsert-only
+// (retired rows persist — they are FK parents and what makes retired-workspace dispatch fail
+// loud); workflow_kinds and node_input_kinds are pure mirrors nothing FKs, rewritten
+// delete-then-insert so declarations removed from code stop lingering between resets.
+// created_at is first-publish; updated_at stamps only a real change TO THE MIRRORED ROW'S OWN
+// COLUMNS (the DO UPDATE WHERE guards, IS NOT for NULL-safety) — a worker restart republishing an
+// identical registry leaves both untouched. Scope caveat: the guards compare exactly what the row
+// stores, so a workflow gaining a node, or a node changing inputKinds, moves only the
+// delete-then-insert mirrors and bumps nothing here. No actor columns: the publisher is always
+// the code registry itself.
+export function publishCatalog(conn: Database.Database, registry: Registry): string[] {
+  const all = [...registry.workflows.values()];
+  // Publish hygiene: validate the in-memory registry (not possibly-stale DB rows) before any write.
+  validateCatalog(all);
   const published: string[] = [];
+  const publishedAt = nowIso();
   conn.exec('BEGIN IMMEDIATE');
   try {
-    for (const wf of registry.workflows.values()) {
+    for (const wf of all) {
       conn
         .prepare(`
-          INSERT INTO workflows (workflow_id, display_name, temporal_workflow_type, task_queue)
-          VALUES (?,?,?,?) ON CONFLICT(workflow_id) DO UPDATE SET
-          display_name=excluded.display_name, temporal_workflow_type=excluded.temporal_workflow_type,
-          task_queue=excluded.task_queue`)
-        .run(wf.workflowId, wf.displayName, RUN_WORKFLOW_TYPE, taskQueue);
-      // First-declared display wins for duplicate kind declarations.
-      const displayByKind = new Map<string, string>();
+          INSERT INTO workflows (workflow_id, display_name, created_at) VALUES (?,?,?)
+          ON CONFLICT(workflow_id) DO UPDATE SET display_name=excluded.display_name,
+          updated_at=excluded.created_at
+          WHERE workflows.display_name IS NOT excluded.display_name`)
+        .run(wf.workflowId, wf.displayName, publishedAt);
+      // The global kind vocabulary first — nodes.output_kind and workflow_kinds.kind FK it.
+      // validateCatalog already rejected cross-workflow source/display conflicts.
+      const kindUpsert = conn.prepare(`
+        INSERT INTO kinds (kind, source, display_name, created_at) VALUES (?,?,?,?)
+        ON CONFLICT(kind) DO UPDATE SET source=excluded.source, display_name=excluded.display_name,
+        updated_at=excluded.created_at
+        WHERE kinds.source IS NOT excluded.source OR kinds.display_name IS NOT excluded.display_name`);
       for (const k of wf.kinds) {
-        if (!displayByKind.has(k.kind)) {
-          displayByKind.set(k.kind, k.display ?? '');
-        }
+        kindUpsert.run(k.kind, k.source, k.display ?? '', publishedAt);
       }
-      for (const [kind, leaf] of Object.entries(leafKinds(wf))) {
-        const display = displayByKind.get(kind) ?? '';
-        conn
-          .prepare(`
-            INSERT INTO workflow_kinds (workflow_id, kind, leaf, display_name) VALUES (?,?,?,?)
-            ON CONFLICT(workflow_id, kind) DO UPDATE SET leaf=excluded.leaf, display_name=excluded.display_name`)
-          .run(wf.workflowId, kind, leaf ? 1 : 0, display);
+      conn.prepare('DELETE FROM workflow_kinds WHERE workflow_id=?').run(wf.workflowId);
+      const membershipInsert = conn.prepare('INSERT INTO workflow_kinds (workflow_id, kind) VALUES (?,?)');
+      for (const k of wf.kinds) {
+        membershipInsert.run(wf.workflowId, k.kind);
       }
+      const nodeUpsert = conn.prepare(`
+        INSERT INTO nodes (workflow_id, node_id, executor, output_kind, display_name, created_at)
+        VALUES (?,?,?,?,?,?) ON CONFLICT(workflow_id, node_id) DO UPDATE SET
+        executor=excluded.executor, output_kind=excluded.output_kind,
+        display_name=excluded.display_name, updated_at=excluded.created_at
+        WHERE nodes.executor IS NOT excluded.executor
+          OR nodes.output_kind IS NOT excluded.output_kind
+          OR nodes.display_name IS NOT excluded.display_name`);
       for (const nd of wf.nodes) {
-        const codeHash = registry.nodeForWorkflow(wf.workflowId, nd.nodeId).codeHash;
-        const prev = conn
-          .prepare<[string, string], { code_hash: string }>(
-            'SELECT code_hash FROM nodes WHERE workflow_id=? AND node_id=?'
-          )
-          .get(wf.workflowId, nd.nodeId);
-        if (prev !== undefined && prev.code_hash !== codeHash) {
-          published.push(
-            `WARNING: in-place edit detected for ${wf.workflowId}/${nd.nodeId} (code_hash changed under an existing workflow_id — consider copying to _v2)`
-          );
+        nodeUpsert.run(wf.workflowId, nd.nodeId, nd.executor, nd.outputKind, nd.displayName, publishedAt);
+      }
+      conn.prepare('DELETE FROM node_input_kinds WHERE workflow_id=?').run(wf.workflowId);
+      const inputKindInsert = conn.prepare(
+        'INSERT INTO node_input_kinds (workflow_id, node_id, param, kind) VALUES (?,?,?,?)'
+      );
+      for (const nd of wf.nodes) {
+        for (const param of nd.paramNames) {
+          inputKindInsert.run(wf.workflowId, nd.nodeId, param, nd.inputKinds[param]);
         }
-        conn
-          .prepare(`
-            INSERT INTO nodes (workflow_id, node_id, executor, output_kind, display_name, code_hash)
-            VALUES (?,?,?,?,?,?) ON CONFLICT(workflow_id, node_id) DO UPDATE SET
-            executor=excluded.executor, output_kind=excluded.output_kind,
-            display_name=excluded.display_name, code_hash=excluded.code_hash`)
-          .run(wf.workflowId, nd.nodeId, nd.executor, nd.outputKind, nd.displayName, codeHash);
       }
       published.push(`published ${wf.workflowId} (${wf.nodes.length} nodes)`);
     }
@@ -373,10 +469,14 @@ export function publishCatalog(conn: Database.Database, registry: Registry, task
 
 // ---------- engagement space ----------
 
-export function createEngagement(conn: Database.Database, label: string): number {
+export function createEngagement(conn: Database.Database, label: string, opts: { createdBy?: string } = {}): number {
+  const createdBy = opts.createdBy ?? 'user';
+  assertPrincipal(createdBy);
   conn.exec('BEGIN IMMEDIATE');
   try {
-    const info = conn.prepare('INSERT INTO engagements (label, created_at) VALUES (?,?)').run(label, nowIso());
+    const info = conn
+      .prepare('INSERT INTO engagements (label, created_by, created_at) VALUES (?,?,?)')
+      .run(label, createdBy, nowIso());
     conn.exec('COMMIT');
     return Number(info.lastInsertRowid);
   } catch (e) {
@@ -385,7 +485,9 @@ export function createEngagement(conn: Database.Database, label: string): number
   }
 }
 
-// External supply (upload / reference table / hand-built value): produced_by_node_run = NULL.
+// External supply (upload / questionnaire answers / hand-built value): the artifact enters with
+// no producing run, so its origin derives from the kind's birth channel — or 'override' when a
+// computed kind is hand-staged (a corrected intermediate is a legal supply species).
 // Re-supplying identical bytes under the same kind lands on the existing row — the revive path
 // (reported via the returned 'existed' flag).
 export function supplyArtifact(
@@ -396,6 +498,15 @@ export function supplyArtifact(
   data: Uint8Array,
   opts: { label?: string | null; mediaType?: string; createdBy?: string } = {}
 ): SuppliedArtifact {
+  // Guards before the payload write: an unknown kind or a malformed principal must not leave an
+  // orphaned blob behind. Kinds absent from the published vocabulary are rejected; supplying a
+  // computed kind is legal.
+  const known = conn.prepare<[string], { kind: string }>('SELECT kind FROM kinds WHERE kind=?').get(kind);
+  if (known === undefined) {
+    throw new ValidationError(`kind '${kind}' is not in the published kind vocabulary`);
+  }
+  const createdBy = opts.createdBy ?? 'user';
+  assertPrincipal(createdBy);
   const contentHash = sha256Hex(data);
   const ref = writePayload(storageRoot, engagementId, contentHash, data);
   conn.exec('BEGIN IMMEDIATE');
@@ -408,8 +519,8 @@ export function supplyArtifact(
     conn
       .prepare(`
         INSERT INTO artifacts (engagement_id, hash, kind, label, media_type, byte_size,
-        payload_ref, produced_by_node_run, created_by, created_at)
-        VALUES (?,?,?,?,?,?,?,NULL,?,?)
+        payload_ref, created_by, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
         ON CONFLICT(engagement_id, kind, hash) DO NOTHING`)
       .run(
         engagementId,
@@ -419,7 +530,7 @@ export function supplyArtifact(
         opts.mediaType ?? 'text/plain',
         data.length,
         ref,
-        opts.createdBy ?? 'user',
+        createdBy,
         nowIso()
       );
     const row = requireRow(
@@ -446,6 +557,7 @@ export function createWorkspace(
   opts: { createdBy?: string; copiedFrom?: number | null } = {}
 ): number {
   const createdBy = opts.createdBy ?? 'user';
+  assertPrincipal(createdBy);
   const copiedFrom = opts.copiedFrom ?? null;
   conn.exec('BEGIN IMMEDIATE');
   try {
@@ -456,9 +568,10 @@ export function createWorkspace(
       .run(engagementId, workflowId, label, copiedFrom, createdBy, nowIso());
     const wfr = Number(info.lastInsertRowid);
     if (copiedFrom !== null) {
+      // Copied memberships are NEW memberships: fresh created_* under the copying actor.
       conn
         .prepare(`
-          INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, added_by, added_at)
+          INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, created_by, created_at)
           SELECT ?, artifact_id, 'user', ?, ? FROM workflow_run_artifacts
           WHERE workflow_run_id=? AND source='user'`)
         .run(wfr, createdBy, nowIso(), copiedFrom);
@@ -471,19 +584,21 @@ export function createWorkspace(
   }
 }
 
-// User attach PROMOTES an engine row to user; engine attach never demotes.
+// User attach PROMOTES an engine row to user (created_* preserved, updated_* stamped — see
+// ATTACH_PROMOTE_SQL); engine attach never demotes.
 export function attach(
   conn: Database.Database,
   workflowRunId: number,
   artifactId: number,
-  opts: { source?: 'user' | 'engine'; addedBy?: string } = {}
+  opts: { source?: 'user' | 'engine'; createdBy?: string } = {}
 ): void {
   const source = opts.source ?? 'user';
-  const addedBy = opts.addedBy ?? 'user';
+  const createdBy = opts.createdBy ?? 'user';
+  assertPrincipal(createdBy);
   conn.exec('BEGIN IMMEDIATE');
   try {
     const sql = source === 'user' ? ATTACH_PROMOTE_SQL : ATTACH_ENGINE_SQL;
-    conn.prepare(sql).run(workflowRunId, artifactId, source, addedBy, nowIso());
+    conn.prepare(sql).run(workflowRunId, artifactId, source, createdBy, nowIso());
     conn.exec('COMMIT');
   } catch (e) {
     conn.exec('ROLLBACK');
@@ -491,8 +606,9 @@ export function attach(
   }
 }
 
-// The user-facing delete — the ONLY delete in the system. The ledger keeps everything, which is
-// why reintroducing the same bytes revives prior work.
+// The user-facing delete — the only other DELETEs are the publish transaction rewriting the
+// workflow_kinds/node_input_kinds mirrors. The ledger keeps everything, which is why
+// reintroducing the same bytes revives prior work.
 export function detach(conn: Database.Database, workflowRunId: number, artifactId: number): void {
   conn.exec('BEGIN IMMEDIATE');
   try {
@@ -519,12 +635,12 @@ export function userAttachments(conn: Database.Database, workflowRunId: number):
 
 export function workspaceArtifacts(conn: Database.Database, workflowRunId: number): WorkspaceArtifact[] {
   const rows = conn
-    .prepare<[number], ArtifactRow & { source: 'user' | 'engine'; produced: number }>(`
-      SELECT a.*, wra.source, (a.produced_by_node_run IS NOT NULL) AS produced
-      FROM workflow_run_artifacts wra JOIN artifacts a USING (artifact_id)
+    .prepare<[number], ArtifactFactsRow & { source: 'user' | 'engine' }>(`
+      SELECT a.*, wra.source
+      FROM workflow_run_artifacts wra JOIN artifact_facts a USING (artifact_id)
       WHERE wra.workflow_run_id=? ORDER BY a.created_at, a.artifact_id`)
     .all(workflowRunId);
-  return rows.map((r) => ({ ...toRef(r), source: r.source, produced: r.produced !== 0 }));
+  return rows.map((r) => ({ ...toRef(r), source: r.source, origin: r.origin }));
 }
 
 export function getWorkspace(conn: Database.Database, workflowRunId: number): WorkflowRunRow {
@@ -537,19 +653,25 @@ export function getWorkspace(conn: Database.Database, workflowRunId: number): Wo
   return row;
 }
 
-export function getArtifact(conn: Database.Database, artifactId: number): ArtifactRow {
-  const row = conn.prepare<[number], ArtifactRow>('SELECT * FROM artifacts WHERE artifact_id=?').get(artifactId);
+export function getArtifact(conn: Database.Database, artifactId: number): ArtifactFactsRow {
+  const row = conn
+    .prepare<[number], ArtifactFactsRow>('SELECT * FROM artifact_facts WHERE artifact_id=?')
+    .get(artifactId);
   if (row === undefined) {
     throw new NotFoundError(`artifact ${artifactId} not found`, 'artifact', artifactId);
   }
   return row;
 }
 
-// The single mutable ledger column.
-export function renameArtifact(conn: Database.Database, artifactId: number, label: string): void {
+// The one content-facing mutable ledger column, stamped: label edits record their actor and time
+// in updated_by/updated_at; everything else on an artifact row stays immutable.
+export function renameArtifact(conn: Database.Database, artifactId: number, label: string, updatedBy: string): void {
+  assertPrincipal(updatedBy);
   conn.exec('BEGIN IMMEDIATE');
   try {
-    conn.prepare('UPDATE artifacts SET label=? WHERE artifact_id=?').run(label, artifactId);
+    conn
+      .prepare('UPDATE artifacts SET label=?, updated_by=?, updated_at=? WHERE artifact_id=?')
+      .run(label, updatedBy, nowIso(), artifactId);
     conn.exec('COMMIT');
   } catch (e) {
     conn.exec('ROLLBACK');
@@ -565,17 +687,22 @@ export function memoLookup(conn: Database.Database, engagementId: number, memoKe
 }
 
 // The completion transaction: ONE atomic, idempotent write filing output artifact + node_run +
-// input list + workspace attachment. fresh=false means the memo already had it.
+// input list + workspace attachment — every row it files shares one filedAt stamp.
+// fresh=false means the memo already had it.
 export function recordCompletion(
   conn: Database.Database,
   storageRoot: string,
   input: CompletionInput
 ): CompletionResult {
+  // Guard before the payload write: a malformed principal must not leave an orphaned blob behind
+  // (same rule as supplyArtifact).
+  assertPrincipal(input.createdBy);
   const contentHash = sha256Hex(input.payload);
   // Payload write is outside the tx (write-once, content-addressed: harmless if the tx then
   // discovers a memo hit).
   const ref = writePayload(storageRoot, input.engagementId, contentHash, input.payload);
 
+  const filedAt = nowIso();
   conn.exec('BEGIN IMMEDIATE');
   try {
     // Fast path: someone already answered this exact question.
@@ -584,23 +711,32 @@ export function recordCompletion(
       .get(input.engagementId, input.memoKey);
     if (existing !== undefined) {
       if (input.workflowRunId !== null) {
-        conn.prepare(ATTACH_ENGINE_SQL).run(input.workflowRunId, existing.artifact_id, 'engine', 'engine', nowIso());
+        conn.prepare(ATTACH_ENGINE_SQL).run(input.workflowRunId, existing.artifact_id, 'engine', 'engine', filedAt);
       }
       conn.exec('COMMIT');
       return { ref: toRef(existing), fresh: false };
     }
 
-    // Slow path: file the fact. Pre-allocate the node_run id (single-writer under BEGIN IMMEDIATE);
-    // the deferred FK lets the artifact point at it before the node_run row exists.
-    const nextId = requireRow(
-      conn.prepare<[], { n: number }>('SELECT COALESCE(MAX(node_run_id), 0) + 1 AS n FROM node_runs').get(),
-      'node_run id preallocation'
-    ).n;
+    // Slow path: file the fact — the output artifact first, then the run row pointing at it
+    // (plain immediate FKs; the circular pair died with the stored producer column).
+    // Kind-class assertion: runs may only produce computed kinds. A typed error here keeps
+    // FK noise out of the constraint-race catch below.
+    const kindRow = conn
+      .prepare<[string], { source: string }>('SELECT source FROM kinds WHERE kind=?')
+      .get(input.outputKind);
+    if (kindRow === undefined) {
+      throw new RuntimeError(`output kind '${input.outputKind}' is not in the published kind vocabulary`);
+    }
+    if (kindRow.source !== 'computed') {
+      throw new RuntimeError(
+        `output kind '${input.outputKind}' is a leaf channel ('${kindRow.source}') — runs may only produce computed kinds`
+      );
+    }
     conn
       .prepare(`
         INSERT INTO artifacts (engagement_id, hash, kind, label, media_type, byte_size,
-        payload_ref, produced_by_node_run, created_by, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(engagement_id, kind, hash) DO NOTHING`)
+        payload_ref, created_by, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(engagement_id, kind, hash) DO NOTHING`)
       .run(
         input.engagementId,
         contentHash,
@@ -609,9 +745,8 @@ export function recordCompletion(
         input.mediaType,
         input.payload.length,
         ref,
-        nextId,
         input.createdBy,
-        nowIso()
+        filedAt
       );
     const out = requireRow(
       conn
@@ -619,28 +754,29 @@ export function recordCompletion(
         .get(input.engagementId, input.outputKind, contentHash),
       'record_completion re-select'
     );
-    conn
+    const runInfo = conn
       .prepare(`
-        INSERT INTO node_runs (node_run_id, engagement_id, workflow_id, node_id,
-        code_hash, memo_key, output_artifact_id, temporal_id) VALUES (?,?,?,?,?,?,?,?)`)
+        INSERT INTO node_runs (engagement_id, workflow_id, node_id,
+        memo_key, output_artifact_id, temporal_id, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)`)
       .run(
-        nextId,
         input.engagementId,
         input.workflowId,
         input.nodeId,
-        input.codeHash,
         input.memoKey,
         out.artifact_id,
-        input.temporalId
+        input.temporalId,
+        input.createdBy,
+        filedAt
       );
+    const nodeRunId = Number(runInfo.lastInsertRowid);
     const insertInput = conn.prepare(`
       INSERT INTO node_run_inputs (node_run_id, artifact_id) VALUES (?,?)
       ON CONFLICT(node_run_id, artifact_id) DO NOTHING`);
     for (const artifactId of new Set(input.inputArtifactIds)) {
-      insertInput.run(nextId, artifactId);
+      insertInput.run(nodeRunId, artifactId);
     }
     if (input.workflowRunId !== null) {
-      conn.prepare(ATTACH_ENGINE_SQL).run(input.workflowRunId, out.artifact_id, 'engine', 'engine', nowIso());
+      conn.prepare(ATTACH_ENGINE_SQL).run(input.workflowRunId, out.artifact_id, 'engine', 'engine', filedAt);
     }
     conn.exec('COMMIT');
     return { ref: toRef(out), fresh: true };
@@ -655,7 +791,7 @@ export function recordCompletion(
       throw e;
     }
     if (input.workflowRunId !== null) {
-      attach(conn, input.workflowRunId, winner.artifact_id, { source: 'engine', addedBy: 'engine' });
+      attach(conn, input.workflowRunId, winner.artifact_id, { source: 'engine', createdBy: 'engine' });
     }
     return { ref: winner, fresh: false };
   }
@@ -713,13 +849,14 @@ export function listWorkspaces(conn: Database.Database, engagementId: number): W
     .all(engagementId);
 }
 
-// The pool browser (idx_browse), newest first, optional kind/substring filter.
+// The pool browser (idx_browse), newest first, optional kind/substring filter. Reads the
+// artifact_facts view — browse rows carry derived provenance onto the wire.
 export function browseArtifacts(
   conn: Database.Database,
   engagementId: number,
   opts: { kind?: string | null; q?: string | null } = {}
-): ArtifactRow[] {
-  let sql = 'SELECT * FROM artifacts WHERE engagement_id=?';
+): ArtifactFactsRow[] {
+  let sql = 'SELECT * FROM artifact_facts WHERE engagement_id=?';
   const params: (number | string)[] = [engagementId];
   if (opts.kind) {
     sql += ' AND kind=?';
@@ -731,7 +868,7 @@ export function browseArtifacts(
     params.push(like, like, like);
   }
   sql += ' ORDER BY created_at DESC, artifact_id DESC';
-  return conn.prepare<(number | string)[], ArtifactRow>(sql).all(...params);
+  return conn.prepare<(number | string)[], ArtifactFactsRow>(sql).all(...params);
 }
 
 // Ledger facts, newest first, each with its input artifact ids.
@@ -752,10 +889,13 @@ function getNodeRun(conn: Database.Database, nodeRunId: number): NodeRunWithInpu
   return { ...row, input_artifact_ids: inputs.map((i) => i.artifact_id) };
 }
 
-// produced_by (idx_reverse_lineage) and consumed_by (idx_consumer).
+// produced_by (idx_reverse_lineage) and consumed_by (idx_consumer). Several runs can converge on
+// one artifact; the earliest run wins deterministically — the same rule artifact_facts serves.
 export function artifactLineage(conn: Database.Database, artifactId: number): ArtifactLineage {
   const produced = conn
-    .prepare<[number], { node_run_id: number }>('SELECT node_run_id FROM node_runs WHERE output_artifact_id=?')
+    .prepare<[number], { node_run_id: number }>(
+      'SELECT node_run_id FROM node_runs WHERE output_artifact_id=? ORDER BY node_run_id LIMIT 1'
+    )
     .get(artifactId);
   const consumers = conn
     .prepare<[number], { node_run_id: number }>(
@@ -768,19 +908,34 @@ export function artifactLineage(conn: Database.Database, artifactId: number): Ar
   };
 }
 
-// The catalog mirror: every published workflow with its kinds and nodes. ORDER BY rowid preserves
-// first-insert order across upserts.
+// The catalog mirror: every published workflow with its kinds and nodes. workflow_kinds and
+// node_input_kinds are rewritten per publish, so their rowid order is declaration order; nodes
+// keep first-insert order across upserts. leaf is derived per workflow (no node produces the
+// kind), never stored. Known skew, accepted: nodes rows are never deleted, so a RETIRED node row
+// (renamed without a db reset) still counts as a producer here — a kind that lost its last
+// current producer keeps leaf=false until the stale row is retired for real.
 export function catalogSnapshot(conn: Database.Database): CatalogWorkflow[] {
+  // Explicit projection — the spread below puts exactly these columns on the snapshot, so a new
+  // workflows column never leaks by accident.
   const workflows = conn
-    .prepare<[], { workflow_id: string; display_name: string; temporal_workflow_type: string; task_queue: string }>(
-      'SELECT * FROM workflows ORDER BY workflow_id'
+    .prepare<[], { workflow_id: string; display_name: string; created_at: string; updated_at: string | null }>(
+      'SELECT workflow_id, display_name, created_at, updated_at FROM workflows ORDER BY workflow_id'
     )
     .all();
-  const kindsStmt = conn.prepare<[string], { kind: string; leaf: number; display_name: string | null }>(
-    'SELECT kind, leaf, display_name FROM workflow_kinds WHERE workflow_id=? ORDER BY rowid'
-  );
-  const nodesStmt = conn.prepare<[string], CatalogNodeEntry>(
-    'SELECT node_id, executor, output_kind, display_name, code_hash FROM nodes WHERE workflow_id=? ORDER BY rowid'
+  const kindsStmt = conn.prepare<
+    [string],
+    { kind: string; source: string; leaf: number; display_name: string | null }
+  >(`
+    SELECT wk.kind, k.source, k.display_name,
+      NOT EXISTS (SELECT 1 FROM nodes n WHERE n.workflow_id = wk.workflow_id AND n.output_kind = wk.kind) AS leaf
+    FROM workflow_kinds wk JOIN kinds k ON k.kind = wk.kind
+    WHERE wk.workflow_id=? ORDER BY wk.rowid`);
+  const nodesStmt = conn.prepare<
+    [string],
+    { node_id: string; executor: string; output_kind: string; display_name: string | null }
+  >('SELECT node_id, executor, output_kind, display_name FROM nodes WHERE workflow_id=? ORDER BY rowid');
+  const inputKindsStmt = conn.prepare<[string, string], { param: string; kind: string | null }>(
+    'SELECT param, kind FROM node_input_kinds WHERE workflow_id=? AND node_id=? ORDER BY rowid'
   );
   return workflows.map((wf) => ({
     ...wf,
@@ -788,7 +943,12 @@ export function catalogSnapshot(conn: Database.Database): CatalogWorkflow[] {
     // an empty badge.
     kinds: kindsStmt
       .all(wf.workflow_id)
-      .map((k) => ({ kind: k.kind, leaf: k.leaf, display_name: k.display_name || k.kind })),
-    nodes: nodesStmt.all(wf.workflow_id),
+      .map((k) => ({ kind: k.kind, source: k.source, leaf: k.leaf, display_name: k.display_name || k.kind })),
+    nodes: nodesStmt.all(wf.workflow_id).map((n) => ({
+      ...n,
+      input_kinds: Object.fromEntries(
+        inputKindsStmt.all(wf.workflow_id, n.node_id).map((row) => [row.param, row.kind])
+      ),
+    })),
   }));
 }

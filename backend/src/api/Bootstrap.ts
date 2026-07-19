@@ -1,7 +1,6 @@
 import type { Client } from '@temporalio/client';
 import { pino } from 'pino';
 import { buildRegistry } from '../domain/registry/Registry.js';
-import { CODE_HASHES } from '../generated/CodeHashes.js';
 import { connect, initDb, publishCatalog } from '../infrastructure/db/Db.js';
 import { loadEnv } from '../infrastructure/env/Env.js';
 import { errorMessage } from '../shared/errors/Errors.js';
@@ -18,10 +17,10 @@ export async function bootstrap(): Promise<void> {
   const logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
   const instance = initDb(env.dbPath);
-  const registry = buildRegistry(ALL_WORKFLOWS, CODE_HASHES);
+  const registry = buildRegistry(ALL_WORKFLOWS);
   const conn = connect(env.dbPath);
   try {
-    for (const line of publishCatalog(conn, registry, env.temporalTaskQueue)) {
+    for (const line of publishCatalog(conn, registry)) {
       logger.info(`[catalog] ${line}`);
     }
   } finally {

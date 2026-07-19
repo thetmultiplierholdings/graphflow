@@ -1,8 +1,10 @@
 # graphflow backend
 
 An engagement-scoped, memoized workflow engine—SQLite ledger + real Temporal execution +
-workflows baked in code. The Fastify API is the HTTP face of the engine and the only process
-that talks to Temporal; the Next.js frontend in `../frontend` consumes it over snake_case JSON.
+workflows baked in code. The Fastify API is the HTTP layer and the only thing a frontend talks
+to (its routes reach Temporal through the `TemporalGateway` seam in `src/api/Deps.ts`; the CLI
+and scripts open their own Temporal clients); the Next.js frontend in `../frontend` consumes it
+over snake_case JSON. The technical design document is the root `../README.md`.
 
 ## Run
 
@@ -11,8 +13,10 @@ Credentials live in `.env` (`TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_
 
 ```
 npm install
-npm run check                 # typecheck + tests + lint + code-hash freshness
+npm run check                 # typecheck + tests + lint + workflow-folder discipline
 npm run seed -- --fresh       # seed the demo dataset (terminates old runs, resets db + payload store)
+                              # REQUIRED once when pulling a schema change: no migrations exist,
+                              # and boot fails loud (publishCatalog) against a stale db
 npm run dev                   # API on :8000 (+ embedded Temporal worker)
 ```
 
@@ -41,19 +45,34 @@ version.
 **Temporal.** Workflows are plain exported async functions (`GraphflowRun`,
 `GraphflowHumanTask`—the function name is the workflow type); queries and the update-based
 submit use `defineQuery`/`defineUpdate` + `setHandler` (the submit validator rejects malformed
-reviewer answers synchronously, before they can ever be filed); activities are a
+reviewer answers — including a reviewer that is not a `'<type>[:<name>]'` principal —
+synchronously, before they can ever be filed); activities are a
 `createActivities(deps)` factory whose object keys are the activity names. Workflow-sandbox code
 (`src/temporal/Context.ts`, `Workflows.ts`, everything under `src/domain` and `src/workflows`)
 never imports `node:*`—hashing inside the sandbox uses `@noble/hashes`.
 
-**Per-node `code_hash`.** `npm run gen:hashes` parses the authored TypeScript source of each
-`defineNode(...)` call (ts-morph)—plus `hashWith` function sources and constant values, plus
-`codeSalt`—and emits `src/generated/CodeHashes.ts` (checked in; `npm run check` fails if stale).
-Hashes are per-node and derived from source text, so a semantic edit re-executes exactly that
-node, while nodes copy-pasted unchanged into a `_v2` file keep their memo hits—including
-answers given by humans. Runtime-source reflection (`Function.prototype.toString()`) is
-deliberately not used: transpiler/bundler output shifts would silently rewrite every hash and
-re-ask every human question.
+**Name identity (the naming contract).** The node's declared id IS its version identity:
+`memo_key = sha256(node_id ':' input_hash)` (`memoKey` in `src/domain/canonical/Canonical.ts`).
+Nodes meant to span versions live ONCE in `src/workflows/nodes_shared/` and are listed by every
+workflow that uses them — same name, same code, same memo hits, including answers given by
+humans. A behavior change—body, helper, validator, output kind, executor—forces a RENAME
+(`calculate_tax` → `calculate_tax_v2`) and belongs in the owning workflow's `nodes_special/`;
+an edit to a shared node under an unchanged name changes every workflow that lists it, which is
+why shared code must never carry versioned behavior. One node per file, file name == node_id
+(enforced by `npm run check:workflows`). There is no mechanical tripwire for a forgotten rename;
+`validateCatalog` (in `src/domain/registry/Registry.ts`, run by every publish) catches the
+declared-shape divergences it can (same name, different executor/output/inputKinds/display
+across workflows) and the rest is the contract.
+
+**Kinds are first-class.** A global `kinds` table classifies every kind by its birth channel
+(`upload` / `questionnaire` / `email` / `computed`); `artifacts.kind` and `nodes.output_kind` FK
+it, and `supplyArtifact` rejects unknown kinds. Every node declares a total `inputKinds` map
+(param → consumed kind, or null for scalar), published to `node_input_kinds` and enforced at run
+time before hashing. Artifact provenance is DERIVED, never stored: the `artifact_facts` view
+computes `produced_by_node_run` (earliest producing run) and `origin`
+(`produced | upload | questionnaire | email | override`). Questionnaire answers are canonicalized
+server-side (upload route flag `canonical_json=true`), so a re-answered identical form converges
+on the same artifact and revives downstream memo hits.
 
 **Worker restarts.** On startup the worker runs `adoptOpenWorkflows()`—a no-op signal sweep
 over this instance's open workflows—so their Temporal stickiness transfers to the live worker
@@ -65,22 +84,25 @@ carry a 5s deadline: an unhealthy task drops out of one sweep rather than wedgin
 ```
 src/
   domain/          pure, bundle-safe (canonical JSON + hashing, registry factories, ArtifactHandle, decimal strings)
-  workflows/       THE PRODUCT—one file per workflow version (filename stem == workflow_id)
+  workflows/       THE PRODUCT—one folder per workflow version (folder name == workflow_id); each
+                   holds workflow.ts (the DAG) + enums.ts (its Kind/NodeId vocabulary + KINDS
+                   declarations) + nodes_special/ (this version's behavior, one node per file,
+                   file name == node_id). nodes_shared/ is the version-spanning library: shared
+                   nodes (same layout) + the shared vocabulary
   temporal/        Context (the memoize-or-execute walk) + Workflows (bundle entry) + Activities + Runtime
   infrastructure/  env, SQLite ledger + completion transaction, payload store
   api/             Fastify service (routes, wire serializers, SSE progress stream)
   cli/             init / worker / demo / seed / tasks / submit / show / download
-  generated/       CodeHashes.ts—emitted by `npm run gen:hashes`, checked in, never hand-edited
   shared/errors/   local mirror of @multiplier/lib-shared-errors
-scripts/           generate-code-hashes.ts + cleanup-temporal.ts (used by the frontend e2e suite)
+scripts/           check-workflows.ts (folder discipline) + cleanup-temporal.ts (frontend e2e suite)
 sample_docs/       mock "PDF" documents (.txt) the CLI seed/demo attaches
 ```
 
 ## Deviations from the monorepo standards (and why)
 
 1. **better-sqlite3 + hand-written SQL, not Drizzle/Postgres.** The ledger semantics
-   (`BEGIN IMMEDIATE`, deferred circular FK pair, MAX+1 id pre-allocation, idempotent completion
-   transaction) *are* the product; SQLite is the deliberate v0 stand-in for Postgres.
+   (`BEGIN IMMEDIATE`, the idempotent completion transaction, the derived `artifact_facts` view)
+   *are* the product; SQLite is the deliberate v0 stand-in for Postgres.
    Migrating to Drizzle/Postgres is a post-move project. `src/infrastructure/db/Db.ts` stays
    concrete functions (no repository interface over 26 SQL functions); the narrow
    `TemporalGateway` interface in `src/api/` covers the seam where tests actually mock.
@@ -91,10 +113,14 @@ sample_docs/       mock "PDF" documents (.txt) the CLI seed/demo attaches
    `@multiplier/lib-shared-monetary`—payload money is decimal strings end to end (canonical
    JSON bans floats) and needs exact ROUND_HALF_UP quantization. The eventual `MonetaryAmount`
    swap is a call-site rewrite, not an import swap; accepted.
-4. **Biome override:** snake_case filenames allowed in `src/workflows/` only—the filename IS
-   the workflow version (`workflow_id == filename stem`), a load-bearing product rule.
+4. **Biome override:** snake_case names allowed under `src/workflows/` only—the folder IS
+   the workflow version (`workflow_id == folder name`), a load-bearing product rule enforced by
+   `npm run check:workflows`.
 5. **Wire JSON is snake_case** (the frontend contract); internal identifiers are camelCase; the
-   mapping lives in `src/api/Serializers.ts` and the transport types.
+   mapping lives in `src/api/Serializers.ts` and the transport types. One deliberate wire-key ≠
+   column-name exception: workspace members serve the membership's `created_by`/`created_at` as
+   `added_by`/`added_at` (aliased in `MEMBERS_SQL`) because the joined row also carries the
+   artifact's own `created_*`.
 6. **No `application/` layer**—the API routes are the application services; adding a
    pass-through layer would violate the altitude rule.
 7. **Integral numbers absorb their decimal point at `JSON.parse`** (`12.0` parses to `12`), so

@@ -10,15 +10,16 @@ import {
 import type { ArtifactRef } from '../domain/artifact/ArtifactRef.js';
 import { canonicalBytes } from '../domain/canonical/Canonical.js';
 import type { JsonValue } from '../domain/json/JsonValue.js';
+import { isPrincipal } from '../domain/principal/Principal.js';
 import { buildRegistry } from '../domain/registry/Registry.js';
-import { CODE_HASHES } from '../generated/CodeHashes.js';
 import { errorMessage } from '../shared/errors/Errors.js';
 import { ALL_WORKFLOWS } from '../workflows/index.js';
 import type { Acts } from './Activities.js';
 import { Ctx, type RunInput, type Summary, type TransportValue } from './Context.js';
 
-// Bundle entry. The exported function names ARE the Temporal workflow types: the catalog stores
-// 'GraphflowRun' and ensure_human_task starts 'GraphflowHumanTask' by string.
+// Bundle entry. The exported function names ARE the Temporal workflow types: startWorkspace
+// (Runtime.ts) starts 'GraphflowRun' via the RUN_WORKFLOW_TYPE constant and ensure_human_task
+// starts 'GraphflowHumanTask' by string — the catalog stores no dispatch metadata.
 //
 // GraphflowRun        wfrun-{instance}-{workflow_run_id}: executes a registered workflow file over
 //                     the user-attachment snapshot; the code IS the DAG.
@@ -28,7 +29,7 @@ import { Ctx, type RunInput, type Summary, type TransportValue } from './Context
 
 // Module scope: deterministic and pure; the manifest statically pulls every workflow version into
 // the bundle, so the registry is identical in every process.
-const REGISTRY = buildRegistry(ALL_WORKFLOWS, CODE_HASHES);
+const REGISTRY = buildRegistry(ALL_WORKFLOWS);
 
 const short = proxyActivities<Acts>({ startToCloseTimeout: '30s' });
 const completion = proxyActivities<Acts>({ startToCloseTimeout: '60s' });
@@ -38,7 +39,6 @@ export interface TaskInput {
   engagement_id: number;
   workflow_id: string;
   node_id: string;
-  code_hash: string;
   memo_key: string;
   output_kind: string;
   display_name: string;
@@ -96,7 +96,16 @@ function validateSubmission(submission: Submission, inp: TaskInput): void {
     submission.result === null ||
     Array.isArray(submission.result)
   ) {
-    throw ApplicationFailure.create({ message: "submission must be {'reviewer': str, 'result': dict}" });
+    throw ApplicationFailure.create({ message: "submission must be {'reviewer'?: principal, 'result': dict}" });
+  }
+  // The API route and CLI wrap reviewer names as 'user:<name>' before submitting; this check only
+  // fires for out-of-contract direct Temporal clients. Rejecting here (synchronously, to the
+  // submitter) is what keeps a bare name from reaching recordCompletion's assertPrincipal and
+  // spinning the completion activity in a retry loop.
+  if (submission.reviewer !== undefined && !isPrincipal(submission.reviewer)) {
+    throw ApplicationFailure.create({
+      message: `reviewer '${submission.reviewer}' is not a principal — expected '<type>[:<name>]' with type user|engine|system|agent`,
+    });
   }
   // Own-property check — `in` would see Object.prototype names and validate vacuously.
   const missing = inp.result_required_keys.filter((k) => !Object.hasOwn(submission.result, k));
@@ -116,7 +125,7 @@ function validateSubmission(submission: Submission, inp: TaskInput): void {
     // Node no longer registered on this worker; required keys were still enforced above.
     return;
   }
-  const validator = registered.def.resultValidator;
+  const validator = registered.resultValidator;
   if (validator === undefined) {
     return;
   }
@@ -142,7 +151,7 @@ export async function GraphflowHumanTask(inp: TaskInput): Promise<ArtifactRef> {
         }
         return ref;
       }
-      const filed = await completion.record_human_completion(inp, submission.result, submission.reviewer ?? 'unknown');
+      const filed = await completion.record_human_completion(inp, submission.result, submission.reviewer ?? 'user');
       ref = filed;
       done = true;
       return filed;

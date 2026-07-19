@@ -121,26 +121,25 @@ async function buildTaskInput(deps: ActivityDeps, req: NodeRequest): Promise<Tas
     const args = decodeArgs(req.args_transport, loader);
     let task: NodeResult;
     try {
-      task = await registered.def.run(args);
+      task = await registered.run(args);
     } catch (e) {
       // A crashing question-builder is deterministic: fail the run visibly instead of retrying forever.
       throw ApplicationFailure.create({
-        message: `human node ${registered.def.nodeId} failed building its task: ${errorMessage(e)}`,
+        message: `human node ${registered.nodeId} failed building its task: ${errorMessage(e)}`,
         type: 'NodeError',
         nonRetryable: true,
       });
     }
     if (!isHumanTask(task)) {
-      throw ApplicationFailure.nonRetryable(`human node ${registered.def.nodeId} must return a HumanTask`);
+      throw ApplicationFailure.nonRetryable(`human node ${registered.nodeId} must return a HumanTask`);
     }
     return {
       engagement_id: req.engagement_id,
       workflow_id: req.workflow_id,
       node_id: req.node_id,
-      code_hash: registered.codeHash,
       memo_key: req.memo_key,
-      output_kind: registered.def.outputKind,
-      display_name: registered.def.displayName,
+      output_kind: registered.outputKind,
+      display_name: registered.displayName,
       instructions: task.instructions,
       payload: encodePayloadValue(task.payload),
       result_required_keys: task.resultRequiredKeys,
@@ -167,7 +166,7 @@ export function createActivities(deps: ActivityDeps) {
     async attach_artifact(workflowRunId: number, artifactId: number): Promise<void> {
       const conn = connect(deps.dbPath);
       try {
-        attach(conn, workflowRunId, artifactId, { source: 'engine', addedBy: 'engine' });
+        attach(conn, workflowRunId, artifactId, { source: 'engine', createdBy: 'engine' });
       } finally {
         conn.close();
       }
@@ -187,13 +186,13 @@ export function createActivities(deps: ActivityDeps) {
         const args = decodeArgs(req.args_transport, loader);
         // Node-body exceptions propagate as ordinary (retryable) activity failures — the
         // 5-attempt policy absorbs transients; authors throw type 'NodeError' for bad inputs.
-        const result = await registered.def.run(args);
+        const result = await registered.run(args);
         let output: { payload: Uint8Array; mediaType: string };
         try {
           output = toOutputBytes(result);
         } catch (e) {
           throw ApplicationFailure.create({
-            message: `node ${registered.def.nodeId} produced a non-canonical payload: ${errorMessage(e)}`,
+            message: `node ${registered.nodeId} produced a non-canonical payload: ${errorMessage(e)}`,
             type: 'NodeError',
             nonRetryable: true,
           });
@@ -205,9 +204,8 @@ export function createActivities(deps: ActivityDeps) {
           workflowRunId: req.workflow_run_id,
           workflowId: req.workflow_id,
           nodeId: req.node_id,
-          codeHash: registered.codeHash,
           memoKey: req.memo_key,
-          outputKind: registered.def.outputKind,
+          outputKind: registered.outputKind,
           payload: output.payload,
           mediaType: output.mediaType,
           createdBy: 'engine',
@@ -258,7 +256,6 @@ export function createActivities(deps: ActivityDeps) {
           workflowRunId: taskInput.requested_by_workflow_run,
           workflowId: taskInput.workflow_id,
           nodeId: taskInput.node_id,
-          codeHash: taskInput.code_hash,
           memoKey: taskInput.memo_key,
           outputKind: taskInput.output_kind,
           payload,

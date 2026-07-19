@@ -52,6 +52,9 @@ export const isSupersede = (value: 'true' | 'false' | '1' | '0' | undefined): bo
 export interface CatalogKindOut {
   kind: string;
   display_name: string;
+  // The authored birth channel (upload | questionnaire | email | computed).
+  source: string;
+  // Derived per workflow: no node of the workflow produces the kind.
   leaf: boolean;
 }
 
@@ -60,13 +63,18 @@ export interface CatalogNodeOut {
   display_name: string | null;
   executor: string;
   output_kind: string;
-  code_hash: string;
+  // The declared input ports: param -> consumed kind, or null for a scalar argument.
+  input_kinds: Record<string, string | null>;
 }
 
 export interface CatalogWorkflowOut {
   workflow_id: string;
   display_name: string;
-  task_queue: string;
+  // First publish / last change to the workflow ROW itself, i.e. its display_name (null until
+  // one happens) — node/kind edits bump their own rows, not this. Workflow level only; kind/node
+  // stamps stay db-only.
+  created_at: string;
+  updated_at: string | null;
   superseded_by: string | null;
   kinds: CatalogKindOut[];
   nodes: CatalogNodeOut[];

@@ -25,7 +25,6 @@ export interface TaskInfo {
   engagement_id: number;
   workflow_id: string;
   node_id: string;
-  code_hash: string;
   memo_key: string;
   output_kind: string;
   display_name: string;
@@ -180,7 +179,7 @@ export function createTemporalGateway(opts: TemporalGatewayOptions): TemporalGat
     },
 
     async startWorkspace(workflowRunId: number, supersede: boolean): Promise<string> {
-      await startWorkspace(client, dbPath, workflowRunId, supersede);
+      await startWorkspace(client, dbPath, workflowRunId, env.temporalTaskQueue, supersede);
       return runWorkflowId(instance, workflowRunId);
     },
 

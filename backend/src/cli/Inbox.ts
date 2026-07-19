@@ -3,6 +3,7 @@ import type { Client } from '@temporalio/client';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import type { JsonValue } from '../domain/json/JsonValue.js';
+import { assertPrincipal } from '../domain/principal/Principal.js';
 import { connect, readArtifactPayload } from '../infrastructure/db/Db.js';
 import { HUMAN_TASK_WORKFLOW_TYPE, humanTaskIdPrefix } from '../temporal/Ids.js';
 import type { TaskInfo } from '../temporal/Workflows.js';
@@ -119,6 +120,9 @@ async function approveOpenTasks(opts: AutoApproverOptions, isStopped: () => bool
 // The mock HITL: every ~2s sweep the inbox and submit an unchanged approval for each open verify
 // task. Per-task and per-sweep errors are swallowed (races/transients — the next sweep retries).
 export function startAutoApprover(opts: AutoApproverOptions): AutoApprover {
+  // Tripwire before the loop starts: a bare-name reviewer would otherwise fail asynchronously,
+  // task by task, inside the swallowed-error sweep.
+  assertPrincipal(opts.reviewer);
   let stopped = false;
   let wake: () => void = () => undefined;
   const stopRequested = new Promise<void>((resolve) => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ValidationError } from '../../shared/errors/Errors.js';
-import { canonicalBytes, hashValue, memoKey } from './Canonical.js';
+import { canonicalBytes, hashValue, memoKey, sha256Hex } from './Canonical.js';
 
 const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
@@ -90,11 +90,15 @@ describe('canonical', () => {
     expect(decode(canonicalBytes({ [emoji]: 1, [fullwidthZ]: 2 }))).toBe(`{"${fullwidthZ}":2,"${emoji}":1}`);
   });
 
-  it('memo key composition is deterministic and code-hash sensitive', () => {
-    const codeHash = 'c'.repeat(64);
+  it('memo key composition is deterministic and node-name sensitive', () => {
     const inputHash = 'i'.repeat(64);
-    expect(memoKey(codeHash, inputHash)).toBe(memoKey(codeHash, inputHash));
-    expect(memoKey(codeHash, inputHash)).not.toBe(memoKey('d'.repeat(64), inputHash));
-    expect(memoKey(codeHash, inputHash)).toMatch(/^[0-9a-f]{64}$/);
+    expect(memoKey('calculate_tax', inputHash)).toBe(memoKey('calculate_tax', inputHash));
+    // The node's name IS its version identity: a rename opens a new question universe.
+    expect(memoKey('calculate_tax', inputHash)).not.toBe(memoKey('calculate_tax_v2', inputHash));
+    expect(memoKey('calculate_tax', inputHash)).not.toBe(memoKey('calculate_tax', 'j'.repeat(64)));
+    expect(memoKey('calculate_tax', inputHash)).toMatch(/^[0-9a-f]{64}$/);
+    // Fixed vector: memo_key = sha256(node_id ':' input_hash) — the key is human-composable now;
+    // this pins the exact preimage layout (bare concatenation with a ':' separator).
+    expect(memoKey('n', 'i'.repeat(64))).toBe(sha256Hex(`n:${'i'.repeat(64)}`));
   });
 });

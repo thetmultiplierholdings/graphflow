@@ -5,24 +5,18 @@ import type { ArtifactRef } from '../domain/artifact/ArtifactRef.js';
 import type { JsonValue } from '../domain/json/JsonValue.js';
 import { errorMessage } from '../shared/errors/Errors.js';
 import { ALL_WORKFLOWS } from './index.js';
-import {
-  appendToMaster,
-  buildReport,
-  calculateTax,
-  ocrBrokerageStatement,
-  ocrPaymentSlip,
-  taxDemoWorkflow,
-  validateVerifiedTxns,
-  verifyTxns,
-} from './tax_demo_workflow.js';
-import {
-  appendToMaster as appendToMasterV2,
-  buildReport as buildReportV2,
-  calculateTax as calculateTaxV2,
-  ocrBrokerageStatement as ocrBrokerageStatementV2,
-  ocrPaymentSlip as ocrPaymentSlipV2,
-  taxDemoWorkflowV2,
-} from './tax_demo_workflow_v2.js';
+import { appendToMaster } from './nodes_shared/append_to_master.js';
+import { ocrBrokerageStatement } from './nodes_shared/ocr_brokerage_statement.js';
+import { ocrPaymentSlip } from './nodes_shared/ocr_payment_slip.js';
+import { validateVerifiedTxns, verifyTxns } from './nodes_shared/verify_txns.js';
+import { Kind } from './tax_demo_workflow/enums.js';
+import { buildReport } from './tax_demo_workflow/nodes_special/build_report.js';
+import { calculateTax } from './tax_demo_workflow/nodes_special/calculate_tax.js';
+import { taxDemoWorkflow } from './tax_demo_workflow/workflow.js';
+import { Kind as KindV2, NodeId as NodeIdV2 } from './tax_demo_workflow_v2/enums.js';
+import { buildReportV2 } from './tax_demo_workflow_v2/nodes_special/build_report_v2.js';
+import { calculateTaxV2 } from './tax_demo_workflow_v2/nodes_special/calculate_tax_v2.js';
+import { taxDemoWorkflowV2 } from './tax_demo_workflow_v2/workflow.js';
 
 let nextArtifactId = 0;
 
@@ -48,29 +42,25 @@ async function sampleDoc(name: string, kind: string): Promise<ArtifactHandle> {
 
 async function januaryDocs(): Promise<{ statements: ArtifactHandle[]; slips: ArtifactHandle[] }> {
   const statements = await Promise.all(
-    ['morgan_stanley.txt', 'goldman_sachs.txt', 'fidelity.txt'].map((name) => sampleDoc(name, 'brokerage_statement'))
+    ['morgan_stanley.txt', 'goldman_sachs.txt', 'fidelity.txt'].map((name) => sampleDoc(name, Kind.BrokerageStatement))
   );
   const slips = await Promise.all(
-    ['payslip_jan.txt', 'payslip_feb.txt', 'payslip_mar.txt'].map((name) => sampleDoc(name, 'payment_slip'))
+    ['payslip_jan.txt', 'payslip_feb.txt', 'payslip_mar.txt'].map((name) => sampleDoc(name, Kind.PaymentSlip))
   );
   return { statements, slips };
 }
 
 // Runs the per-document chains the way the DAG does, auto-approving each extraction unchanged.
-async function verifiedBatchesWith(
-  ocrStatement: typeof ocrBrokerageStatement,
-  ocrSlip: typeof ocrPaymentSlip,
-  statements: ArtifactHandle[],
-  slips: ArtifactHandle[]
-): Promise<ArtifactHandle[]> {
+// The OCR nodes are shared across workflow versions (nodes_shared), so one helper serves both.
+async function verifiedBatches(statements: ArtifactHandle[], slips: ArtifactHandle[]): Promise<ArtifactHandle[]> {
   const batches: ArtifactHandle[] = [];
   for (const statement of statements) {
-    const ocr = await ocrStatement.run({ statement });
-    batches.push(jsonHandle({ approved: true, transactions: ocr.transactions }, 'verified_txns'));
+    const ocr = await ocrBrokerageStatement.run({ statement });
+    batches.push(jsonHandle({ approved: true, transactions: ocr.transactions }, Kind.VerifiedTxns));
   }
   for (const slip of slips) {
-    const ocr = await ocrSlip.run({ slip });
-    batches.push(jsonHandle({ approved: true, transactions: ocr.transactions }, 'verified_txns'));
+    const ocr = await ocrPaymentSlip.run({ slip });
+    batches.push(jsonHandle({ approved: true, transactions: ocr.transactions }, Kind.VerifiedTxns));
   }
   return batches;
 }
@@ -189,7 +179,7 @@ EMPLOYER: BLUE HARBOUR LLP
 
 describe('ocr nodes', () => {
   it('parses transaction lines from a brokerage statement, ignoring headers', async () => {
-    const statement = await sampleDoc('morgan_stanley.txt', 'brokerage_statement');
+    const statement = await sampleDoc('morgan_stanley.txt', Kind.BrokerageStatement);
     const out = await ocrBrokerageStatement.run({ statement });
     expect(out).toEqual({
       doc_kind: 'brokerage_statement',
@@ -202,7 +192,7 @@ describe('ocr nodes', () => {
   });
 
   it('parses a payment slip with doc_kind payment_slip', async () => {
-    const slip = await sampleDoc('payslip_mar.txt', 'payment_slip');
+    const slip = await sampleDoc('payslip_mar.txt', Kind.PaymentSlip);
     const out = await ocrPaymentSlip.run({ slip });
     expect(out).toEqual({
       doc_kind: 'payment_slip',
@@ -216,7 +206,7 @@ describe('ocr nodes', () => {
 
 describe('verify_txns', () => {
   it('builds the human question around the ocr artifact', async () => {
-    const ocr = jsonHandle({ doc_kind: 'payment_slip', transactions: [] }, 'ocr_txns');
+    const ocr = jsonHandle({ doc_kind: 'payment_slip', transactions: [] }, Kind.OcrTxns);
     const task = await verifyTxns.run({ ocr });
     expect(task.instructions).toBe(
       'Compare the extracted transactions against the source document. Correct any misread digits, then approve.'
@@ -281,7 +271,7 @@ describe('validateVerifiedTxns', () => {
 describe('append_to_master', () => {
   it('folds the January batches into one master list sorted by (date, description, amount)', async () => {
     const { statements, slips } = await januaryDocs();
-    const batches = await verifiedBatchesWith(ocrBrokerageStatement, ocrPaymentSlip, statements, slips);
+    const batches = await verifiedBatches(statements, slips);
     const master = await appendToMaster.run({ batches });
     expect(master.count).toBe(13);
     expect(master.transactions.map((t) => `${t.date}|${t.description}|${t.amount}`)).toEqual([
@@ -305,82 +295,130 @@ describe('append_to_master', () => {
 describe('calculate_tax', () => {
   it('computes the January golden numbers at the v1 25% rate', async () => {
     const { statements, slips } = await januaryDocs();
-    const batches = await verifiedBatchesWith(ocrBrokerageStatement, ocrPaymentSlip, statements, slips);
+    const batches = await verifiedBatches(statements, slips);
     const master = await appendToMaster.run({ batches });
-    const calc = await calculateTax.run({ master: jsonHandle(master, 'master_txn_list') });
+    const calc = await calculateTax.run({ master: jsonHandle(master, Kind.MasterTxnList) });
     expect(calc).toEqual({ total: '17095.95', tax_rate: '0.25', tax_due: '4273.99' });
   });
 
   it('computes the February golden numbers once the extra documents are added', async () => {
     const { statements, slips } = await januaryDocs();
-    statements.push(await sampleDoc('extra_ubs.txt', 'brokerage_statement'));
-    slips.push(await sampleDoc('extra_payslip_apr.txt', 'payment_slip'));
-    const batches = await verifiedBatchesWith(ocrBrokerageStatement, ocrPaymentSlip, statements, slips);
+    statements.push(await sampleDoc('extra_ubs.txt', Kind.BrokerageStatement));
+    slips.push(await sampleDoc('extra_payslip_apr.txt', Kind.PaymentSlip));
+    const batches = await verifiedBatches(statements, slips);
     const master = await appendToMaster.run({ batches });
     expect(master.count).toBe(17);
-    const calc = await calculateTax.run({ master: jsonHandle(master, 'master_txn_list') });
+    const calc = await calculateTax.run({ master: jsonHandle(master, Kind.MasterTxnList) });
     expect(calc).toEqual({ total: '22450.95', tax_rate: '0.25', tax_due: '5612.74' });
   });
 
-  it('computes the Blue Harbour golden numbers at the v2 24% rate', async () => {
-    const statements = [await sampleDoc('bh_schwab.txt', 'brokerage_statement')];
-    const slips = [await sampleDoc('bh_payslip_feb.txt', 'payment_slip')];
-    const batches = await verifiedBatchesWith(ocrBrokerageStatementV2, ocrPaymentSlipV2, statements, slips);
-    const master = await appendToMasterV2.run({ batches });
+  it('computes the Blue Harbour golden numbers at the v2 24% rate, echoing the residency answer', async () => {
+    const statements = [await sampleDoc('bh_schwab.txt', KindV2.BrokerageStatement)];
+    const slips = [await sampleDoc('bh_payslip_feb.txt', KindV2.PaymentSlip)];
+    const batches = await verifiedBatches(statements, slips);
+    const master = await appendToMaster.run({ batches });
     expect(master.count).toBe(4);
-    const calc = await calculateTaxV2.run({ master: jsonHandle(master, 'master_txn_list') });
-    expect(calc).toEqual({ total: '6703.15', tax_rate: '0.24', tax_due: '1608.76' });
+    const calc = await calculateTaxV2.run({
+      master: jsonHandle(master, KindV2.MasterTxnList),
+      residency: jsonHandle({ country: 'SG' }, KindV2.ResidencyAnswers),
+    });
+    expect(calc).toEqual({ total: '6703.15', tax_rate: '0.24', tax_due: '1608.76', residency: 'SG' });
   });
 });
 
 describe('build_report', () => {
   it('renders the January report byte-exactly', async () => {
     const { statements, slips } = await januaryDocs();
-    const batches = await verifiedBatchesWith(ocrBrokerageStatement, ocrPaymentSlip, statements, slips);
+    const batches = await verifiedBatches(statements, slips);
     const master = await appendToMaster.run({ batches });
-    const calc = await calculateTax.run({ master: jsonHandle(master, 'master_txn_list') });
+    const calc = await calculateTax.run({ master: jsonHandle(master, Kind.MasterTxnList) });
     const report = await buildReport.run({
       statements,
       slips,
-      master: jsonHandle(master, 'master_txn_list'),
-      calc: jsonHandle(calc, 'tax_calc'),
+      master: jsonHandle(master, Kind.MasterTxnList),
+      calc: jsonHandle(calc, Kind.TaxCalc),
     });
     expect(report).toBe(JANUARY_REPORT);
   });
 
   it('renders the Blue Harbour v2 report byte-exactly with the 24% literal', async () => {
-    const statements = [await sampleDoc('bh_schwab.txt', 'brokerage_statement')];
-    const slips = [await sampleDoc('bh_payslip_feb.txt', 'payment_slip')];
-    const batches = await verifiedBatchesWith(ocrBrokerageStatementV2, ocrPaymentSlipV2, statements, slips);
-    const master = await appendToMasterV2.run({ batches });
-    const calc = await calculateTaxV2.run({ master: jsonHandle(master, 'master_txn_list') });
+    const statements = [await sampleDoc('bh_schwab.txt', KindV2.BrokerageStatement)];
+    const slips = [await sampleDoc('bh_payslip_feb.txt', KindV2.PaymentSlip)];
+    const batches = await verifiedBatches(statements, slips);
+    const master = await appendToMaster.run({ batches });
+    const calc = await calculateTaxV2.run({
+      master: jsonHandle(master, KindV2.MasterTxnList),
+      residency: jsonHandle({ country: 'SG' }, KindV2.ResidencyAnswers),
+    });
     const report = await buildReportV2.run({
       statements,
       slips,
-      master: jsonHandle(master, 'master_txn_list'),
-      calc: jsonHandle(calc, 'tax_calc'),
+      master: jsonHandle(master, KindV2.MasterTxnList),
+      calc: jsonHandle(calc, KindV2.TaxCalc),
     });
     expect(report).toBe(BLUE_HARBOUR_REPORT);
   });
 });
 
 describe('workflow manifest', () => {
-  it('lists v1 then v2, differing only in the pinned version-bump metadata', () => {
+  it('lists v1 then v2; the behavior-changed v2 nodes are RENAMED per the naming contract', () => {
     expect(ALL_WORKFLOWS.map((wd) => wd.workflowId)).toEqual(['tax_demo_workflow', 'tax_demo_workflow_v2']);
     expect(taxDemoWorkflow.displayName).toBe('Tax demo workflow');
     expect(taxDemoWorkflowV2.displayName).toBe('Tax demo workflow v2');
     expect(calculateTax.displayName).toBe('Calculator (mock): sum * 25%');
     expect(calculateTaxV2.displayName).toBe('Calculator (mock): sum * 24%');
-    const nodeIds = [
+    expect(taxDemoWorkflow.nodes.map((node) => node.nodeId)).toEqual([
       'ocr_brokerage_statement',
       'ocr_payment_slip',
       'verify_txns',
       'append_to_master',
       'calculate_tax',
       'build_report',
-    ];
-    expect(taxDemoWorkflow.nodes.map((node) => node.nodeId)).toEqual(nodeIds);
-    expect(taxDemoWorkflowV2.nodes.map((node) => node.nodeId)).toEqual(nodeIds);
-    expect(taxDemoWorkflow.kinds.map((kind) => kind.kind)).toEqual(taxDemoWorkflowV2.kinds.map((kind) => kind.kind));
+    ]);
+    // Under name identity an unchanged name keeps its memoized answers: the four SHARED nodes
+    // (one definition in nodes_shared/, listed by both workflows) keep v1's names — cross-version
+    // memo reuse by construction; the two changed ones carry _v2.
+    expect(taxDemoWorkflowV2.nodes.map((node) => node.nodeId)).toEqual([
+      'ocr_brokerage_statement',
+      'ocr_payment_slip',
+      'verify_txns',
+      'append_to_master',
+      NodeIdV2.CalculateTaxV2,
+      NodeIdV2.BuildReportV2,
+    ]);
+  });
+
+  it('v2 declares the questionnaire kind on top of the shared v1 vocabulary', () => {
+    const v1Kinds = taxDemoWorkflow.kinds.map((kind) => kind.kind);
+    const v2Kinds = taxDemoWorkflowV2.kinds.map((kind) => kind.kind);
+    expect(v2Kinds).toEqual(expect.arrayContaining(v1Kinds));
+    expect(v2Kinds).toContain(KindV2.ResidencyAnswers);
+    expect(v2Kinds).toHaveLength(v1Kinds.length + 1);
+    const residency = taxDemoWorkflowV2.kinds.find((kind) => kind.kind === KindV2.ResidencyAnswers);
+    expect(residency?.source).toBe('questionnaire');
+    // Shared kinds must agree across workflows (one global kinds table): same source, same display.
+    for (const k of taxDemoWorkflow.kinds) {
+      const twin = taxDemoWorkflowV2.kinds.find((other) => other.kind === k.kind);
+      expect(twin?.source).toBe(k.source);
+      expect(twin?.display).toBe(k.display);
+    }
+  });
+
+  it('declares total inputKinds maps wiring the real dataflow', () => {
+    expect(ocrBrokerageStatement.inputKinds).toEqual({ statement: Kind.BrokerageStatement });
+    expect(ocrPaymentSlip.inputKinds).toEqual({ slip: Kind.PaymentSlip });
+    expect(verifyTxns.inputKinds).toEqual({ ocr: Kind.OcrTxns });
+    expect(appendToMaster.inputKinds).toEqual({ batches: Kind.VerifiedTxns });
+    expect(calculateTax.inputKinds).toEqual({ master: Kind.MasterTxnList });
+    expect(buildReport.inputKinds).toEqual({
+      statements: Kind.BrokerageStatement,
+      slips: Kind.PaymentSlip,
+      master: Kind.MasterTxnList,
+      calc: Kind.TaxCalc,
+    });
+    expect(calculateTaxV2.inputKinds).toEqual({
+      master: KindV2.MasterTxnList,
+      residency: KindV2.ResidencyAnswers,
+    });
   });
 });

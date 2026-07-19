@@ -24,7 +24,7 @@ commands:
   demo                                run the end-to-end demo
   seed [--fresh]                      seed the demo dataset (Acme + Blue Harbour)
   tasks                               list open human tasks
-  submit <task_id> [--reviewer NAME]  approve a human task
+  submit <task_id> [--reviewer NAME]  approve a human task (recorded as principal 'user:NAME')
   show <workflow_run_id>              show a workspace's artifacts
   download <artifact_id> <out>        download an artifact payload
 `;
@@ -88,7 +88,9 @@ async function cmdSubmit(env: Env, taskId: string, reviewer: string): Promise<vo
       out('  cannot build an auto-approval for this task payload');
       return;
     }
-    const ref = await handle.executeUpdate(submitUpdate, { args: [{ reviewer, result }] });
+    // Wrap the WHOLE flag value (default included): the submit validator rejects bare names, and
+    // a bare name slipping through would spin the completion activity in a retry loop.
+    const ref = await handle.executeUpdate(submitUpdate, { args: [{ reviewer: `user:${reviewer}`, result }] });
     out(`  submitted; answer artifact#${ref.artifact_id}`);
   } finally {
     await client.connection.close();
@@ -101,9 +103,8 @@ function cmdShow(env: Env, workflowRunId: number): void {
     const ws = getWorkspace(conn, workflowRunId);
     out(`  workspace ${ws.workflow_run_id}: ${ws.label} (${ws.workflow_id}, engagement ${ws.engagement_id})`);
     for (const a of workspaceArtifacts(conn, workflowRunId)) {
-      const origin = a.produced ? 'produced' : 'supplied';
       out(
-        `    #${String(a.artifact_id).padEnd(4)} ${a.kind.padEnd(20)} [${a.source}/${origin}] ` +
+        `    #${String(a.artifact_id).padEnd(4)} ${a.kind.padEnd(20)} [${a.source}/${a.origin}] ` +
           `${a.label ?? ''}  ${a.hash.slice(0, 10)}`
       );
     }

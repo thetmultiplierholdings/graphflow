@@ -3,7 +3,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type Database from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
-import type { WorkspaceListRow } from '../../infrastructure/db/Db.js';
 import {
   attach,
   createWorkspace,
@@ -31,8 +30,8 @@ import {
   WorkspaceCreateSchema,
   WorkspacePatchSchema,
 } from '../Schemas.js';
-import type { WorkspaceDetailOut } from '../Serializers.js';
-import { workspaceDetail } from '../Serializers.js';
+import type { WorkspaceDetailOut, WorkspaceListOut } from '../Serializers.js';
+import { workspaceDetail, workspaceListOut } from '../Serializers.js';
 
 const workflowInCatalog = (conn: Database.Database, workflowId: string): boolean =>
   conn.prepare<[string], { '1': number }>('SELECT 1 FROM workflows WHERE workflow_id=?').get(workflowId) !== undefined;
@@ -109,10 +108,10 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
   r.get(
     '/engagements/:engagement_id/workflow-runs',
     { schema: { params: EngagementIdParamsSchema } },
-    async (request): Promise<WorkspaceListRow[]> => {
+    async (request): Promise<WorkspaceListOut[]> => {
       return withConn(deps, (conn) => {
         getEngagement(conn, request.params.engagement_id);
-        return listWorkspaces(conn, request.params.engagement_id);
+        return listWorkspaces(conn, request.params.engagement_id).map(workspaceListOut);
       });
     }
   );
@@ -160,17 +159,22 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
       const body = request.body;
       return withConn(deps, (conn) => {
         getWorkspace(conn, workflowRunId);
+        const label = body.label ?? null;
         const workflowId = body.workflow_id ?? null;
         if (workflowId !== null && !workflowInCatalog(conn, workflowId)) {
           throw new ValidationError(`workflow '${workflowId}' is not in the catalog`);
+        }
+        // PATCH {} changes nothing — skip the UPDATE so updated_* records only real changes.
+        if (label === null && workflowId === null) {
+          return workspaceDetail(conn, workflowRunId);
         }
         conn.exec('BEGIN IMMEDIATE');
         try {
           conn
             .prepare(
-              'UPDATE workflow_runs SET label=COALESCE(?, label), workflow_id=COALESCE(?, workflow_id) WHERE workflow_run_id=?'
+              'UPDATE workflow_runs SET label=COALESCE(?, label), workflow_id=COALESCE(?, workflow_id), updated_by=?, updated_at=? WHERE workflow_run_id=?'
             )
-            .run(body.label ?? null, workflowId, workflowRunId);
+            .run(label, workflowId, 'user', nowIso(), workflowRunId);
           conn.exec('COMMIT');
         } catch (e) {
           conn.exec('ROLLBACK');
@@ -190,9 +194,12 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
         getWorkspace(conn, workflowRunId);
         conn.exec('BEGIN IMMEDIATE');
         try {
+          // Archive and unarchive are both stamped updates; re-POSTing the same state re-stamps
+          // (matches the pre-existing archived_at re-stamp behavior).
+          const at = nowIso();
           conn
-            .prepare('UPDATE workflow_runs SET archived_at=? WHERE workflow_run_id=?')
-            .run(request.body.archived ? nowIso() : null, workflowRunId);
+            .prepare('UPDATE workflow_runs SET archived_at=?, updated_by=?, updated_at=? WHERE workflow_run_id=?')
+            .run(request.body.archived ? at : null, 'user', at, workflowRunId);
           conn.exec('COMMIT');
         } catch (e) {
           conn.exec('ROLLBACK');
@@ -213,7 +220,7 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
         if (art.engagement_id !== ws.engagement_id) {
           throw new ValidationError('artifact belongs to a different engagement');
         }
-        attach(conn, ws.workflow_run_id, art.artifact_id, { source: 'user', addedBy: 'user' });
+        attach(conn, ws.workflow_run_id, art.artifact_id, { source: 'user', createdBy: 'user' });
       });
       return reply.code(204).send();
     }

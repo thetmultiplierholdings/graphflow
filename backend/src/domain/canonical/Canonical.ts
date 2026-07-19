@@ -132,8 +132,10 @@ export function hashValue(value: CanonicalInput): string {
   return sha256Hex(canonicalBytes(value));
 }
 
-// memo_key = H(code_hash || input_hash). Engagement scoping is applied at lookup time via
-// UNIQUE (engagement_id, memo_key)—never inside the hash.
-export function memoKey(codeHash: string, inputHash: string): string {
-  return sha256Hex(`${codeHash}${inputHash}`);
+// memo_key = H(node_id ':' input_hash). The node's declared name is its version identity (the
+// naming contract: a behavior change forces a rename); the ':' separator keeps a variable-length
+// name unambiguous against the fixed 64-hex input hash. Engagement scoping is applied at lookup
+// time via UNIQUE (engagement_id, memo_key)—never inside the hash.
+export function memoKey(nodeId: string, inputHash: string): string {
+  return sha256Hex(`${nodeId}:${inputHash}`);
 }

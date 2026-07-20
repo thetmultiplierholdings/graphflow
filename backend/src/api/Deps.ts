@@ -7,9 +7,11 @@ import type { Registry } from '../domain/registry/Registry.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import { NotFoundError, ValidationError } from '../shared/errors/Errors.js';
 import { HUMAN_TASK_WORKFLOW_TYPE, runWorkflowId } from '../temporal/Ids.js';
-import { startWorkspace } from '../temporal/Runtime.js';
+import { startWorkflowRun } from '../temporal/Runtime.js';
 
-// Status derived from Temporal describe (never stored). null from describeRun = NOT_FOUND = never executed.
+// Execution STATE derived from Temporal describe, never stored — the db keeps only the write-once
+// executed_at dispatch stamp. null from describeRun = NOT_FOUND = no execution exists (a virgin
+// run, or a frozen-but-idle row whose dispatch died before reaching Temporal).
 export type DerivedRunStatus = 'running' | 'completed' | 'failed';
 
 // Cumulative snapshot from the 'progress' workflow query; a failed query yields {} upstream.
@@ -53,9 +55,10 @@ export interface TemporalGateway {
   queryProgress(temporalWorkflowId: string): Promise<ProgressSnapshot>;
   queryTaskInfo(taskWorkflowId: string): Promise<TaskInfo>;
   listTaskWorkflows(): Promise<TaskWorkflowExecution[]>;
-  // Starts (or attaches to) the workspace run; resolves to the temporal workflow id. Throws
-  // RuntimeError with context.code === 'SNAPSHOT_CHANGED' when a run is open on a stale snapshot.
-  startWorkspace(workflowRunId: number, supersede: boolean): Promise<string>;
+  // Starts (or attaches to) the run's execution and freezes the row on first dispatch; resolves
+  // to the temporal workflow id. Throws RuntimeError with context.code === 'RUN_FROZEN' when the
+  // run already completed (a business run happens at most once — copy/revise instead).
+  startWorkflowRun(workflowRunId: number): Promise<string>;
   // Synchronous workflow update; validator rejections surface as ValidationError (route → 422),
   // unknown/completed tasks as NotFoundError (route → 404).
   executeSubmit(taskWorkflowId: string, submission: Submission): Promise<ArtifactRef>;
@@ -178,8 +181,8 @@ export function createTemporalGateway(opts: TemporalGatewayOptions): TemporalGat
       return out;
     },
 
-    async startWorkspace(workflowRunId: number, supersede: boolean): Promise<string> {
-      await startWorkspace(client, dbPath, workflowRunId, env.temporalTaskQueue, supersede);
+    async startWorkflowRun(workflowRunId: number): Promise<string> {
+      await startWorkflowRun(client, dbPath, workflowRunId, env.temporalTaskQueue);
       return runWorkflowId(instance, workflowRunId);
     },
 

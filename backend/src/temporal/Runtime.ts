@@ -1,18 +1,23 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Client, Connection, type WorkflowHandle, WorkflowNotFoundError } from '@temporalio/client';
+import {
+  Client,
+  Connection,
+  WorkflowExecutionAlreadyStartedError,
+  type WorkflowHandle,
+  WorkflowNotFoundError,
+} from '@temporalio/client';
 import { NativeConnection, Worker } from '@temporalio/worker';
-import type { ArtifactRef } from '../domain/artifact/ArtifactRef.js';
 import type { Registry } from '../domain/registry/Registry.js';
-import { connect, getWorkspace, instanceId, userAttachments } from '../infrastructure/db/Db.js';
+import { connect, freezeAndLoadDispatch, instanceId, type WorkflowRunDispatch } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import { RuntimeError, throwIfStandardError } from '../shared/errors/Errors.js';
 import { createActivities } from './Activities.js';
 import type { RunInput } from './Context.js';
 import { humanTaskIdPrefix, RUN_WORKFLOW_TYPE, runIdPrefix, runWorkflowId } from './Ids.js';
 
-// Node-side runtime: Temporal Cloud client, the worker, and the execute-workspace path.
+// Node-side runtime: Temporal Cloud client, the worker, and the execute-workflow-run path.
 // Workflow-id helpers live in Ids.ts (shared with activities, API routes, and the CLI).
 
 // API key present => Temporal Cloud (TLS + API-key auth); absent => plain local connection.
@@ -102,89 +107,80 @@ export async function adoptOpenWorkflows(client: Client, env: Env, instance: str
   return adopted;
 }
 
-interface WorkspaceStart {
-  engagementId: number;
-  workflowId: string;
-  attachments: ArtifactRef[];
-  instance: string;
-  declaredNodeparamslots: string[];
-}
+const frozenCompletedError = (workflowRunId: number): RuntimeError =>
+  new RuntimeError(`workflow run ${workflowRunId} has already completed — create a copy or revision to run it again`, {
+    code: 'RUN_FROZEN',
+  });
 
-function loadWorkspaceStart(dbPath: string, workflowRunId: number): WorkspaceStart {
-  const conn = connect(dbPath);
-  try {
-    const ws = getWorkspace(conn, workflowRunId);
-    const attachments = userAttachments(conn, workflowRunId);
-    const instance = instanceId(conn);
-    // The catalog carries no dispatch metadata anymore, but membership is still the guard: a
-    // workspace pointing at an unpublished workflow must fail here, not hang in Temporal.
-    const wfRow = conn
-      .prepare<[string], { workflow_id: string }>('SELECT workflow_id FROM workflows WHERE workflow_id=?')
-      .get(ws.workflow_id);
-    if (wfRow === undefined) {
-      throw new RuntimeError(`workflow '${ws.workflow_id}' is not in the catalog (run \`init\` first)`);
-    }
-    const declaredNodeparamslots = conn
-      .prepare<[string], { nodeparamslot: string }>(
-        'SELECT nodeparamslot FROM workflow_nodeparamslots WHERE workflow_id=?'
-      )
-      .all(ws.workflow_id)
-      .map((r) => r.nodeparamslot);
-    return {
-      engagementId: ws.engagement_id,
-      workflowId: ws.workflow_id,
-      attachments,
-      instance,
-      declaredNodeparamslots,
-    };
-  } finally {
-    conn.close();
+// The dispatch policies, exported ONLY for the unit pin in Runtime.test.ts: the reuse policy is
+// the server-side arbiter that a COMPLETED business run never re-executes (race F1) while any
+// other closed state may retry in place — the describe fast path above it is advisory, so a
+// silent regression here would be invisible to every deterministic test. Do NOT copy the reuse
+// policy to ensure_human_task: its start-after-completion self-complete path needs
+// ALLOW_DUPLICATE.
+export const RUN_START_POLICIES = {
+  workflowIdConflictPolicy: 'USE_EXISTING',
+  workflowIdReusePolicy: 'ALLOW_DUPLICATE_FAILED_ONLY',
+} as const;
+
+// The start-error translation (the other half of the race-F1 fix), exported for the unit pin:
+// the server refusing a restart over a COMPLETED execution must surface as RUN_FROZEN (409),
+// never a raw 500; everything else propagates untouched.
+export function rethrowStartError(e: Error, workflowRunId: number): never {
+  const err = throwIfStandardError(e);
+  if (err instanceof WorkflowExecutionAlreadyStartedError) {
+    throw frozenCompletedError(workflowRunId);
   }
+  throw err;
 }
 
-const sameSnapshot = (a: readonly string[], b: readonly string[]): boolean =>
-  a.length === b.length && a.every((hash, i) => hash === b[i]);
-
-// POST /workflow-runs/{id}/execute — start (or attach to) wfrun-{instance}-{id} with the current
-// user-attachment snapshot; returns the handle without awaiting the result. Attaching to an OPEN
-// run with an unchanged snapshot is idempotent (double-click safety); an open run with a CHANGED
-// snapshot throws RuntimeError with context.code='SNAPSHOT_CHANGED' (the API maps it to 409)
-// unless supersede, which terminates it and restarts on the fresh snapshot.
-export async function startWorkspace(
+// POST /workflow-runs/{id}/execute — start (or attach to) wfrun-{instance}-{id}; returns the
+// handle without awaiting the result. The row freezes at first dispatch (freezeAndLoadDispatch:
+// stamp + snapshot in ONE transaction), so the snapshot can never drift under an open run — the
+// old SNAPSHOT_CHANGED/supersede machinery is gone. Per prior-execution state: RUNNING attaches
+// idempotently (USE_EXISTING — double-click safety); COMPLETED refuses with RUN_FROZEN (a
+// business run happens at most once — copy/revise instead); any other closed state (or none)
+// re-dispatches under the SAME id — the retry-in-place path, so infra noise never mints a
+// business revision. Benign race, accepted: describe says RUNNING, the run completes before
+// start — the fresh execution memo-replays to completion with zero executed node bodies
+// (frozen snapshot ⇒ identical memo keys).
+export async function startWorkflowRun(
   client: Client,
   dbPath: string,
   workflowRunId: number,
-  taskQueue: string,
-  supersede = false
+  taskQueue: string
 ): Promise<WorkflowHandle> {
-  const start = loadWorkspaceStart(dbPath, workflowRunId);
-  const wfId = runWorkflowId(start.instance, workflowRunId);
-
+  // Short-lived conn for the id prefix — never hold a connection across an await.
+  const idConn = connect(dbPath);
+  let wfId: string;
   try {
-    const prior = client.workflow.getHandle(wfId);
-    const desc = await prior.describe();
-    if (desc.status.name === 'RUNNING') {
-      const running = await prior.query<string[]>('snapshot');
-      const current = start.attachments.map((a) => a.hash).sort();
-      if (!sameSnapshot(running, current)) {
-        if (!supersede) {
-          throw new RuntimeError(
-            `workspace ${workflowRunId}: attachments changed while a run is open — re-execute with supersede=True to terminate it and restart on the fresh snapshot`,
-            { code: 'SNAPSHOT_CHANGED' }
-          );
-        }
-        // Completed facts are already filed; in-flight completion transactions are idempotent.
-        await prior.terminate('superseded: attachments changed');
-      }
+    wfId = runWorkflowId(instanceId(idConn), workflowRunId);
+  } finally {
+    idConn.close();
+  }
+
+  // Fast-path courtesy 409 — advisory only; the atomic arbiter is the reuse policy on the start
+  // call below (describe is strongly consistent, but the run could complete in the gap).
+  try {
+    const desc = await client.workflow.getHandle(wfId).describe();
+    if (desc.status.name === 'COMPLETED') {
+      throw frozenCompletedError(workflowRunId);
     }
   } catch (e) {
-    // ONLY "no prior execution under this id" is swallowed. Our own errors (SNAPSHOT_CHANGED)
-    // and anything unexpected (query failures, terminate failures) must propagate, or a
-    // supersede silently attaches to the stale run.
+    // ONLY "no prior execution under this id" is swallowed (first dispatch, or a retry after a
+    // dispatch that froze the row but never reached Temporal). Everything else must propagate.
     const err = throwIfStandardError(e);
     if (!(err instanceof WorkflowNotFoundError)) {
       throw err;
     }
+  }
+
+  const conn = connect(dbPath);
+  let start: WorkflowRunDispatch;
+  try {
+    start = freezeAndLoadDispatch(conn, workflowRunId);
+  } finally {
+    conn.close();
   }
 
   const inp: RunInput = {
@@ -198,10 +194,14 @@ export async function startWorkspace(
   // recovery sweeps filter on, so a run can never start somewhere the sweeps don't look. A retired
   // workflow id fails loud inside GraphflowRun ("not registered on this worker") instead of
   // hanging on a stale queue.
-  return client.workflow.start(RUN_WORKFLOW_TYPE, {
-    args: [inp],
-    workflowId: wfId,
-    taskQueue,
-    workflowIdConflictPolicy: 'USE_EXISTING',
-  });
+  try {
+    return await client.workflow.start(RUN_WORKFLOW_TYPE, {
+      args: [inp],
+      workflowId: wfId,
+      taskQueue,
+      ...RUN_START_POLICIES,
+    });
+  } catch (e) {
+    rethrowStartError(e as Error, workflowRunId);
+  }
 }

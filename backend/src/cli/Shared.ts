@@ -4,7 +4,7 @@ import { buildRegistry } from '../domain/registry/Registry.js';
 import { connect, initDb, publishCatalog } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import type { Summary } from '../temporal/Context.js';
-import { startWorkspace } from '../temporal/Runtime.js';
+import { startWorkflowRun } from '../temporal/Runtime.js';
 import { ALL_WORKFLOWS } from '../workflows/index.js';
 
 export const out = (line: string): void => {
@@ -36,14 +36,14 @@ export function cmdInit(env: Env): void {
   publish(env);
 }
 
-// CLI path of execute_workspace: start (or attach to) the run and await its Ctx summary.
-export async function executeWorkspace(
+// CLI execute path: start (or attach to) the run's execution and await its Ctx summary.
+export async function executeWorkflowRun(
   client: Client,
   dbPath: string,
   workflowRunId: number,
   taskQueue: string
 ): Promise<Summary> {
-  const handle = await startWorkspace(client, dbPath, workflowRunId, taskQueue, false);
+  const handle = await startWorkflowRun(client, dbPath, workflowRunId, taskQueue);
   const summary: Summary = await handle.result();
   return summary;
 }

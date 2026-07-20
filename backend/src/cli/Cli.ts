@@ -1,11 +1,11 @@
 import { writeFileSync } from 'node:fs';
 import {
   connect,
-  getWorkspace,
+  getWorkflowRun,
   initDb,
   instanceId,
   readArtifactPayload,
-  workspaceArtifacts,
+  workflowRunArtifacts,
 } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import { loadEnv } from '../infrastructure/env/Env.js';
@@ -25,7 +25,7 @@ commands:
   seed [--fresh]                      seed the demo dataset (Acme + Blue Harbour)
   tasks                               list open human tasks
   submit <task_id> [--reviewer NAME]  approve a human task (recorded as principal 'user:NAME')
-  show <workflow_run_id>              show a workspace's artifacts
+  show <workflow_run_id>              show a workflow run's artifacts
   download <artifact_id> <out>        download an artifact payload
 `;
 
@@ -100,9 +100,11 @@ async function cmdSubmit(env: Env, taskId: string, reviewer: string): Promise<vo
 function cmdShow(env: Env, workflowRunId: number): void {
   const conn = connect(env.dbPath);
   try {
-    const ws = getWorkspace(conn, workflowRunId);
-    out(`  workspace ${ws.workflow_run_id}: ${ws.display_name} (${ws.workflow_id}, engagement ${ws.engagement_id})`);
-    for (const a of workspaceArtifacts(conn, workflowRunId)) {
+    const run = getWorkflowRun(conn, workflowRunId);
+    out(
+      `  workflow run ${run.workflow_run_id}: ${run.lineage_display} (${run.workflow_id}, engagement ${run.engagement_id})`
+    );
+    for (const a of workflowRunArtifacts(conn, workflowRunId)) {
       out(
         `    #${String(a.artifact_id).padEnd(4)} ${a.nodeparamslot.padEnd(20)} [${a.source}/${a.origin}] ` +
           `${a.display_name ?? ''}  ${a.hash.slice(0, 10)}`

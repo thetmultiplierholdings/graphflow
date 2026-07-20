@@ -8,15 +8,22 @@ import type { ArtifactMetaOut } from './Serializers.js';
 
 export const EngagementCreateSchema = z.object({ display_name: z.string().min(1) });
 
-export const WorkspaceCreateSchema = z.object({
+export const WorkflowRunCreateSchema = z.object({
   workflow_id: z.string().min(1),
   display_name: z.string().min(1),
   copy_from: z.number().int().nullable().optional(),
+  // What the create MEANS. Defaults (resolveLineageKind in Db.ts): 'root' without copy_from,
+  // 'copy' with. 'copy' starts a new family (may target a different workflow);
+  // 'revision'/'simulation' extend the parent's family and must keep its workflow.
+  lineage_kind: z.enum(['root', 'copy', 'revision', 'simulation']).optional(),
 });
 
-export const WorkspacePatchSchema = z.object({
-  display_name: z.string().nullable().optional(),
-  workflow_id: z.string().nullable().optional(),
+// workflow_id is immutable after create (a different DAG is a root-class copy, never a
+// re-point) — PATCH accepts display_name only. Unknown keys are zod-stripped, so a stale client
+// sending workflow_id is silently ignored rather than 422'd. min(1) matches the create schema:
+// an empty name would corrupt the derived lineage_display of the whole family.
+export const WorkflowRunPatchSchema = z.object({
+  display_name: z.string().min(1).nullable().optional(),
 });
 
 export const ArchiveBodySchema = z.object({ archived: z.boolean() });
@@ -42,10 +49,6 @@ export const TaskIdParamsSchema = z.object({ task_id: z.string().min(1) });
 
 export const BrowseQuerySchema = z.object({ nodeparamslot: z.string().optional(), q: z.string().optional() });
 export const HumanTasksQuerySchema = z.object({ engagement_id: z.coerce.number().int().optional() });
-export const ExecuteQuerySchema = z.object({ supersede: z.enum(['true', 'false', '1', '0']).optional() });
-
-export const isSupersede = (value: 'true' | 'false' | '1' | '0' | undefined): boolean =>
-  value === 'true' || value === '1';
 
 // ---------- response wire types ----------
 

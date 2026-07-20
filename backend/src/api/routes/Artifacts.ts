@@ -7,9 +7,10 @@ import {
   artifactLineage,
   attach,
   browseArtifacts,
+  frozenRunError,
   getArtifact,
   getEngagement,
-  getWorkspace,
+  getWorkflowRun,
   renameArtifact,
   supplyArtifact,
 } from '../../infrastructure/db/Db.js';
@@ -167,9 +168,14 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: ApiDeps): voi
           throw new ValidationError('nodeparamslot must be a non-empty string');
         }
         if (workflowRunId !== null) {
-          const ws = getWorkspace(conn, workflowRunId);
-          if (ws.engagement_id !== engagementId) {
+          const run = getWorkflowRun(conn, workflowRunId);
+          if (run.engagement_id !== engagementId) {
             throw new ValidationError(`workflow_run ${workflowRunId} belongs to a different engagement`);
+          }
+          // Frozen check BEFORE supplyArtifact: a rejected upload-with-attach must not file the
+          // artifact first (Db.attach remains the backstop for the pure attach path).
+          if (run.executed_at !== null) {
+            throw frozenRunError(workflowRunId);
           }
         }
         const supplied = supplyArtifact(conn, deps.storageRoot, engagementId, nodeparamslot.trim(), data, {

@@ -17,7 +17,7 @@ import { ALL_WORKFLOWS } from '../workflows/index.js';
 import type { Acts } from './Activities.js';
 import { Ctx, type RunInput, type Summary, type TransportValue } from './Context.js';
 
-// Bundle entry. The exported function names ARE the Temporal workflow types: startWorkspace
+// Bundle entry. The exported function names ARE the Temporal workflow types: startWorkflowRun
 // (Runtime.ts) starts 'GraphflowRun' via the RUN_WORKFLOW_TYPE constant and ensure_human_task
 // starts 'GraphflowHumanTask' by string — the catalog stores no dispatch metadata.
 //
@@ -57,18 +57,16 @@ export interface Submission {
 }
 
 export const progressQuery = defineQuery<Summary | Record<string, never>>('progress');
-export const snapshotQuery = defineQuery<string[]>('snapshot');
 export const taskInfoQuery = defineQuery<TaskInfo>('task_info');
 export const submitUpdate = defineUpdate<ArtifactRef, [Submission]>('submit');
 
 export async function GraphflowRun(inp: RunInput): Promise<Summary> {
   // Handlers registered before the first await (the @workflow.init guarantee): queries delivered
-  // in the first workflow-task backlog see initialized state.
+  // in the first workflow-task backlog see initialized state. (The old 'snapshot' query died with
+  // the supersede machinery: the run row freezes at dispatch, so a snapshot can never drift under
+  // an open execution.)
   let ctx: Ctx | undefined;
   setHandler(progressQuery, () => (ctx === undefined ? {} : ctx.summary()));
-  // Sorted content hashes of the snapshot this run executes over — compared by startWorkspace to
-  // detect stale-snapshot re-runs.
-  setHandler(snapshotQuery, () => inp.attachments.map((a) => a.hash).sort());
 
   const wd = REGISTRY.workflows.get(inp.workflow_id);
   if (wd === undefined) {

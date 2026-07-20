@@ -3,9 +3,9 @@
 An engagement-scoped, memoized workflow engine for professional-services work (the demo domain is
 tax preparation). Workflows are TypeScript code executed durably on Temporal; every computed
 answer is filed in an insert-only SQLite ledger keyed by the question asked (node id plus
-canonicalized inputs), so repeating work — re-running a workspace, copying last month's
-engagement forward, re-uploading a corrected document — recomputes only what actually changed
-and reuses everything else, including answers humans already gave.
+canonicalized inputs), so repeating work — executing a no-change revision of last month's run,
+copying it forward with new documents, re-uploading a corrected document — recomputes only what
+actually changed and reuses everything else, including answers humans already gave.
 
 This README is the technical design document. It describes the current implementation with
 file and symbol anchors so a reader (or a fresh coding session) can verify every claim without
@@ -15,18 +15,23 @@ Everything else at the repo root: `typescript_StyleAndRules/` is the snapshot of
 standards that the "Deviations" section of `backend/README.md` is written against; `agents/`,
 `DO_NOT_READ*/`, and `legacy/` hold retired material and are not documentation.
 
-**Current state (frozen 2026-07-19).** The backend is the product and is current. The frontend
+**Current state (frozen 2026-07-20).** The backend is the product and is current. The frontend
 (`frontend/`) predates the latest wire-contract changes and is KNOWN BROKEN against the current
 API: `task_queue` and `code_hash` left the wire, and `source`, `origin`, and `input_nodeparamslots`
 arrived (see "Wire contracts"), as did the additive hygiene fields (`updated_by`/`updated_at` on
-artifacts/workspaces/engagements, `created_by` on engagements, `created_by`/`created_at` on node
+artifacts/workflow runs/engagements, `created_by` on engagements, `created_by`/`created_at` on node
 runs, `created_at`/`updated_at` on catalog workflows; reviewer names now arrive as `user:<name>`
 principals). It also predates the 2026-07-20 global renames: the domain term "kind" became
 `nodeparamslot` everywhere (wire keys `kind`→`nodeparamslot`, `kinds`→`nodeparamslots`,
 `output_kind`→`output_nodeparamslot`, `input_kinds`→`input_nodeparamslots`, the upload multipart
-field and browse query param included), and the `label` field on engagements/artifacts/workspaces
-became `display_name` (request bodies and responses). The frontend still speaks the old
-vocabulary. Porting it, and all e2e work, is deliberately deferred.
+field and browse query param included), and the `label` field on engagements/artifacts/workflow
+runs became `display_name` (request bodies and responses). And it predates the 2026-07-20
+lineage/freeze change: the "workspace" noun is retired (the rows were always `workflow_runs`;
+the old wire key `stats.workspaces` is now `stats.workflow_runs`), run detail and list gained
+`lineage_kind`, `executed_at`, `root_workflow_run_id`, `lineage_byid`, and `lineage_display`,
+PATCH lost `workflow_id`, execute lost `?supersede`, and 409 now means `RUN_FROZEN` or
+`RUN_NOT_COPYABLE` (SNAPSHOT_CHANGED is gone). The frontend still speaks the old vocabulary.
+Porting it, and all e2e work, is deliberately deferred.
 
 ## The domain model
 
@@ -57,17 +62,37 @@ constant in `backend/src/infrastructure/db/Db.ts`).
   vocabulary, a node list, and a `run(ctx)` function that IS the DAG (plain TypeScript control
   flow calling `ctx.node(...)`). Declared with `defineWorkflow`; every version is listed in the
   `ALL_WORKFLOWS` manifest (`backend/src/workflows/index.ts`).
-- **Workspace** (`workflow_runs` + `workflow_run_artifacts`) — the editable business layer: a
-  named set of attached artifacts plus a pinboard of results. A workspace is NOT an execution
-  record; executions live only in Temporal. Membership rows carry `source: user | engine`
-  (workspace provenance, distinct from artifact origin); user-attach promotes an engine row
+- **Workflow run** (`workflow_runs` + `workflow_run_artifacts`) — the business instance: a
+  named set of attached artifacts plus a pinboard of results, editable until frozen. A workflow
+  run is still NOT an execution record — execution state lives only in Temporal; first dispatch
+  stamps the write-once `executed_at` (`freezeAndLoadDispatch` in Db.ts), after which the
+  user-attachment set is immutable (user attach/detach reject with code `RUN_FROZEN`) while
+  engine attach-back continues and `display_name`/archive stay editable. Further work happens on
+  copies, and `lineage_kind` records what a creation-from-parent means: `root` and `copy` START
+  a family (`copy` may target a different workflow — a different DAG is always a root-class
+  copy), `revision` and `simulation` EXTEND one and must keep the parent's workflow
+  (`createWorkflowRun` in Db.ts). The copyability gate: the parent must be frozen AND its
+  Temporal execution terminal — completed and failed both count (fix-forward from a failure is
+  deliberate); never-executed drafts and running parents are uncopyable (the create route asks
+  Temporal via `describeRun` at gate time; there is no `completed_at` column). Lineage is
+  derived, never stored: the `workflow_run_facts` view (in `SCHEMA`, Db.ts — the `artifact_facts`
+  doctrine applied to runs) recomputes `root_workflow_run_id`, `lineage_byid`, and
+  `lineage_display` from `copied_from_workflow_run` + `lineage_kind` on every read, so renaming
+  the family root flows through instantly. Membership rows carry `source: user | engine`
+  (run-membership provenance, distinct from artifact origin); user-attach promotes an engine row
   (`source` flips, the promoter lands in the membership's `updated_*`, first-attach `created_*`
   survives), engine-attach never demotes; detaching is the only user-facing DELETE in the system.
 
+The vocabulary is load-bearing: a **workflow** is the catalog definition, a **workflow run** is
+the business instance, an **execution** is the Temporal side of dispatching one, and a **node
+run** is a ledger fact.
+
 The ledger of computations is `node_runs` + `node_run_inputs`: one `node_runs` row per DISTINCT
-answered question (not per execution — memo hits insert nothing), with `node_run_inputs` holding
-the consumed-artifact edges. Ledger tables are insert-only; the mutable ledger columns are
-`artifacts.display_name` and its `updated_by`/`updated_at` stamps (`renameArtifact` in Db.ts).
+answered question (not per execution — memo hits insert nothing, and run-button presses are not
+recorded here; the only dispatch fact in the db is `workflow_runs.executed_at`), with
+`node_run_inputs` holding the consumed-artifact edges. Ledger tables are insert-only; the mutable
+ledger columns are `artifacts.display_name` and its `updated_by`/`updated_at` stamps
+(`renameArtifact` in Db.ts).
 
 ### Actors and hygiene columns
 
@@ -79,8 +104,11 @@ only (insert-only memo ledger); `workflow_run_artifacts` has `created_*` + `upda
 the mirrored row's own columns change — an identical republish is a no-op); `meta` and the
 publish/edge mirrors are exempt. `created_*` is the FIRST filer — convergence never re-dates it;
 `updated_*` is NULL until first updated (the idempotent promote/publish paths are guarded so
-no-ops never stamp; request-driven rename/PATCH/archive stamp per request); `deleted_at` is
-dormant (always NULL, no reader filters — reserved for a future soft delete).
+no-ops never stamp; request-driven rename/PATCH/archive stamp per request). ONE deliberate
+exemption: the `executed_at` freeze stamp does not stamp `updated_*` — it is itself the
+write-once audit stamp of the dispatch event, and the dispatch path has no attributable actor
+(hygiene comment in Db.ts). `deleted_at` is dormant (always NULL, no reader filters — reserved
+for a future soft delete).
 
 Actor columns hold **principals**: `'<type>[:<name>]'` with type `user | engine | system |
 agent` — e.g. `engine`, `user:thet`, `user:Priya Sharma`, `agent:auto-approver`; bare `user` is
@@ -126,8 +154,9 @@ Consequences:
   tables. Nothing
   stored can diverge from lineage.
 
-Concrete scenario: the user attaches a corrected brokerage statement to a copied workspace and
-re-executes. The OCR node's memo key changes (new `$artifact` hash) so OCR re-runs; its verify
+Concrete scenario: last month's run is frozen, so the user creates a revision of it, attaches a
+corrected brokerage statement, and executes. The OCR node's memo key changes (new `$artifact`
+hash) so OCR re-runs; its verify
 question is new, so a reviewer is asked once; every chain fed by unchanged documents memo-hits;
 the fold, calculator, and report re-run because their inputs changed; the returned `Summary`
 lists exactly which node ids executed, memo-hit, and waited on humans.
@@ -156,22 +185,23 @@ backend/                    the product (Node 22+, npm — not yarn)
                               RENAMED (nodes_special/calculate_tax_v2.ts, build_report_v2.ts)
   src/temporal/             the execution engine
     Workflows.ts              bundle entry; GraphflowRun + GraphflowHumanTask (function name ==
-                              Temporal workflow type); queries progress/snapshot/task_info; submit update
+                              Temporal workflow type); queries progress/task_info; submit update
     Context.ts                Ctx — the memoize-or-execute walk; encodeArgs; enforceInputNodeparamslots
     Activities.ts             node-side I/O: memo_lookup, attach_artifact, run_engine_node,
                               ensure_human_task, record_human_completion (keys == wire activity names)
-    Runtime.ts                Temporal client/worker factories, startWorkspace dispatch,
+    Runtime.ts                Temporal client/worker factories, startWorkflowRun dispatch,
                               adoptOpenWorkflows recovery sweep
     Ids.ts                    RUN_WORKFLOW_TYPE/HUMAN_TASK_WORKFLOW_TYPE constants + workflow-id helpers
   src/infrastructure/
     db/Db.ts                  SCHEMA (the schema source of truth), publishCatalog, supplyArtifact,
-                              recordCompletion, catalogSnapshot, artifactLineage, read models
+                              recordCompletion, createWorkflowRun, freezeAndLoadDispatch,
+                              catalogSnapshot, artifactLineage, read models
     storage/Storage.ts        content-addressed write-once payload store (local dir standing in for S3/GCS)
     env/Env.ts                zod-validated env (.env tolerated, shell wins)
   src/api/                  the HTTP layer — the only thing a frontend talks to; routes reach
                             Temporal only through the TemporalGateway seam (Deps.ts)
     App.ts                    fastify wiring, error envelope (ValidationError→422, NotFoundError→404,
-                              RuntimeError with context.code SNAPSHOT_CHANGED→409)
+                              RuntimeError with context.code in CONFLICT_CODES→409, else 422)
     Bootstrap.ts              startup order: env → initDb → buildRegistry → publishCatalog →
                               client → optional embedded worker → listen
     Deps.ts                   ApiDeps + the narrow TemporalGateway seam (what tests stub)
@@ -218,7 +248,7 @@ workflow's output attached as input); one nodeparamslot = one source+display glo
 declared shape globally.
 
 Then, in one transaction: `workflows` and `nodeparamslots` and `nodes` are upsert-only (retired rows
-persist — they are FK parents of the ledger, and a workspace pointing at a retired workflow must
+persist — they are FK parents of the ledger, and a workflow run pinned to a retired workflow must
 fail loud, not vanish); `workflow_nodeparamslots` (membership) and `node_input_nodeparamslots` (param → nodeparamslot) are
 DELETE-then-INSERT, so declarations removed from code stop lingering. `catalogSnapshot` (Db.ts)
 serves the mirror with `leaf` derived per workflow in SQL (no node of the workflow produces the
@@ -238,9 +268,9 @@ sequenceDiagram
     participant DB as SQLite ledger +<br/>payload store
 
     U->>API: POST /workflow-runs/42/execute
-    API->>DB: load workspace 42 + user attachments (the snapshot)
-    API->>TC: describe wfrun-{instance}-42 (open run? snapshot changed? supersede?)
-    API->>TC: workflow.start(RUN_WORKFLOW_TYPE, id=wfrun-{instance}-42,<br/>queue=env.temporalTaskQueue, USE_EXISTING)
+    API->>TC: describe wfrun-{instance}-42 (COMPLETED → 409 RUN_FROZEN; RUNNING → attach below)
+    API->>DB: freezeAndLoadDispatch: ONE tx — guards, stamp executed_at (set-once),<br/>snapshot user attachments (the freeze)
+    API->>TC: workflow.start(RUN_WORKFLOW_TYPE, id=wfrun-{instance}-42,<br/>queue=env.temporalTaskQueue, USE_EXISTING + ALLOW_DUPLICATE_FAILED_ONLY)
     API-->>U: 202 { temporal_workflow_id } — from here the API only polls (SSE, bottom)
 
     TC-->>WF: workflow task (worker long-polls the env queue)
@@ -277,16 +307,26 @@ sequenceDiagram
 
 The same walk in prose:
 
-1. `POST /workflow-runs/:id/execute` (routes/WorkflowRuns.ts) refuses a workspace with zero
-   user attachments, then calls the gateway's `startWorkspace` (Deps.ts → Runtime.ts).
-2. `startWorkspace` loads the snapshot (user-sourced attachments, hash-ordered), verifies the
-   workflow is in the catalog, and starts Temporal workflow type `RUN_WORKFLOW_TYPE`
-   (`'GraphflowRun'`, Ids.ts) on the env task queue with workflow id
-   `wfrun-{instance}-{workflow_run_id}` and conflict policy USE_EXISTING. Dispatch metadata
-   lives nowhere in the db: run and recovery agree on the env queue by construction. If a run is
-   already open: unchanged snapshot attaches idempotently (double-click safety); changed
-   snapshot throws `SNAPSHOT_CHANGED` (API → 409) unless `supersede=true`, which terminates the
-   stale run and restarts.
+1. `POST /workflow-runs/:id/execute` (routes/WorkflowRuns.ts) fast-fails a run with zero user
+   attachments, then calls the gateway's `startWorkflowRun` (Deps.ts → Runtime.ts). There is no
+   querystring — `?supersede` is gone: the row freezes at first dispatch, so a snapshot can
+   never drift under an open run and there is nothing to supersede.
+2. `startWorkflowRun` (Runtime.ts) describes `wfrun-{instance}-{workflow_run_id}` first:
+   COMPLETED → RuntimeError coded `RUN_FROZEN` (API → 409 — a business run happens at most once;
+   create a copy or revision instead); RUNNING attaches idempotently below (USE_EXISTING —
+   double-click safety); any other closed state or not-found proceeds — retry-in-place under the
+   SAME Temporal id, so infra noise never mints business revisions. Then `freezeAndLoadDispatch`
+   (Db.ts) runs ONE `BEGIN IMMEDIATE`: every deterministic guard (row exists, workflow in the
+   catalog, snapshot non-empty) BEFORE the `executed_at` stamp (set-once via
+   `WHERE executed_at IS NULL`, no `updated_*`), with the user-attachment snapshot
+   (user-sourced, hash-ordered) read in the same transaction — a doomed dispatch rolls back
+   without freezing the row, and freeze and snapshot can never tear apart. Finally
+   `client.workflow.start` of workflow type `RUN_WORKFLOW_TYPE` (`'GraphflowRun'`, Ids.ts) on
+   the env task queue, conflict policy USE_EXISTING plus reuse policy
+   ALLOW_DUPLICATE_FAILED_ONLY — the Temporal server, not the advisory describe, is the arbiter
+   that a COMPLETED run never re-executes; `WorkflowExecutionAlreadyStartedError` maps to
+   `RUN_FROZEN`. Dispatch metadata lives nowhere in the db: run and recovery agree on the env
+   queue by construction.
 3. `GraphflowRun` (Workflows.ts) executes in the deterministic sandbox — no I/O, no clock, no
    db. It resolves the workflow from the compiled-in registry and calls its `run(ctx)`.
 4. `Ctx.node(def, args)` (Context.ts) is the walk, per node call: verify the node is registered
@@ -294,7 +334,7 @@ The same walk in prose:
    (every artifact argument must carry the declared nodeparamslot — single, list, or nested; scalar
    params accept no artifacts); encode arguments three ways (hash form, transport form, input
    artifact ids); mint `memo_key = sha256(node_id ':' input_hash)`; ask the `memo_lookup`
-   activity. Hit → attach the existing artifact to the workspace and return its handle — the
+   activity. Hit → attach the existing artifact to the workflow run and return its handle — the
    node body never runs. Miss + engine node → `run_engine_node` activity executes the body
    node-side and files the completion. Miss + human node → `ensure_human_task` starts a
    `GraphflowHumanTask` workflow (id `node-{instance}-{engagement}-{memo_key}`, USE_EXISTING —
@@ -304,7 +344,7 @@ The same walk in prose:
    the memo (activity-retry guard), assert the output nodeparamslot is `computed` (runs may not produce
    leaf nodeparamslots), insert the artifact (`ON CONFLICT (engagement_id, nodeparamslot, hash) DO NOTHING` — the
    convergence path), insert the `node_runs` row (SQLite assigns the id) and `node_run_inputs`,
-   attach to the requesting workspace. A lost race on `UNIQUE (engagement_id, memo_key)`
+   attach to the requesting workflow run. A lost race on `UNIQUE (engagement_id, memo_key)`
    resolves to the winner via the catch path. `run_engine_node` byte-encodes results by
    contract: `Uint8Array` → octet-stream, string → text/plain, anything else must canonicalize
    (Activities.ts, `toOutputBytes`).
@@ -353,7 +393,15 @@ internal identifiers are camelCase. The shapes a frontend consumes:
   `origin` (`produced | upload | questionnaire | email | override`) — both derived by
   `artifact_facts`; `payload_available` derived from `payload_ref`, which is never exposed.
   Lineage (`GET /artifacts/:id`) serves `produced_by` + `consumed_by` as node runs.
-- **Members** (`MemberOut`, workspace detail): an artifact's meta PLUS the membership columns —
+- **Workflow runs** (`WorkflowRunDetailOut`/`WorkflowRunListOut`, Serializers.ts): the stored
+  `lineage_kind` and `executed_at` (non-null = frozen) plus the derived
+  `root_workflow_run_id`/`lineage_byid`/`lineage_display` from `workflow_run_facts`
+  (`lineage_depth` deliberately stays db-only); the engagement's `stats` counts them under
+  `workflow_runs`. Create accepts optional `copy_from` + `lineage_kind`
+  (`WorkflowRunCreateSchema`); PATCH accepts `display_name` only — a stale client's
+  `workflow_id` is zod-stripped and silently ignored (`WorkflowRunPatchSchema`); execute takes
+  no querystring.
+- **Members** (`MemberOut`, workflow-run detail): an artifact's meta PLUS the membership columns —
   the ONE deliberate exception to wire-key == column-name: the membership's `created_by`/
   `created_at` are served as `added_by`/`added_at` (the joined row already carries the
   artifact's own `created_*`). Members list in first-attach order; promotion is signaled by
@@ -363,17 +411,22 @@ internal identifiers are camelCase. The shapes a frontend consumes:
   and the output artifact. No `code_hash`.
 - **Human tasks** (`HumanTaskOut`): task workflow id, node display/instructions, transport
   payload (artifact refs as `{__artifact__: ...}`), `result_required_keys`.
-- **Errors**: `{ detail }` envelope; 422 validation, 404 not found, 409 only for
-  `SNAPSHOT_CHANGED` (App.ts).
+- **Errors**: `{ detail }` envelope; 422 validation, 404 not found, 409 only for RuntimeErrors
+  coded `RUN_FROZEN` (user attach/detach/upload-attach on a frozen run; executing a completed
+  one) or `RUN_NOT_COPYABLE` (copy_from parent without a terminal execution) — the
+  `CONFLICT_CODES` set in App.ts.
 
 ## Standing invariants (enforce in any change)
 
 1. Identity is content, never provenance; engagement scoping applies at lookup, never inside a
-   hash. Paths, refs, ids, and workspaces never enter memo keys or artifact identity.
+   hash. Paths, refs, ids, and workflow runs never enter memo keys or artifact identity — nor
+   does run lineage (`copied_from_workflow_run`/`lineage_kind`): memo sharing stays
+   engagement-wide, and a no-change revision memo-hits through unchanged inputs alone.
 2. The ledger is insert-only in content; the mutable ledger columns are `artifacts.display_name` and
    its `updated_*` stamps. `created_*` is immutable everywhere — convergence keeps the first
-   filer. The only DELETEs in the system: workspace detach (user-facing) and the publish
-   transaction rewriting the `workflow_nodeparamslots`/`node_input_nodeparamslots` mirrors. `deleted_at` columns
+   filer. The only DELETEs in the system: workflow-run detach (user-facing, rejected once the
+   run is frozen) and the publish transaction rewriting the
+   `workflow_nodeparamslots`/`node_input_nodeparamslots` mirrors. `deleted_at` columns
    are dormant (reserved; nothing sets or filters them).
 3. Behavior change ⇒ node rename. Shared code (`nodes_shared/`) must never carry versioned
    behavior.
@@ -385,15 +438,23 @@ internal identifiers are camelCase. The shapes a frontend consumes:
    bundle); every db/storage/client touch is an activity.
 7. No floats in payloads, ever; money is decimal strings (`DecimalString`).
 8. Schema changes update `schema.dbml` in the same change. Greenfield mode: schema edits ship
-   as reset (`npm run seed -- --fresh`), no migrations yet. The hygiene-column change relies on
-   this: new code against a pre-hygiene db fails loud at boot (publishCatalog hits the missing
-   columns) — reset, don't patch.
+   as reset (`npm run seed -- --fresh`), no migrations yet. For the lineage/freeze change the
+   reset is a CORRECTNESS precondition, not hygiene: pre-existing parked executions predate the
+   freeze semantics and the deleted snapshot-drift check — never "just add the columns" to a
+   live db. New code against a stale db fails loud at boot (the `workflow_run_facts` probe in
+   `initDb`) — reset, don't patch.
 9. No auth anywhere by design (loopback bind is the only guard) — do not ship this exposed.
    Corollary: actor columns are caller-asserted audit data, never authorization input — nothing
    may branch on `created_by`/`updated_by`.
 10. Actor values are principals `'<type>[:<name>]'` (type `user | engine | system | agent`),
     asserted at every Db write boundary (`assertPrincipal`); boundaries that accept bare names
     (submit routes, CLI `--reviewer`) wrap them as `user:<name>` before anything downstream.
+11. Execution STATE lives only in Temporal — no `completed_at`, no status column, ever. The db
+    records exactly ONE execution fact: `workflow_runs.executed_at`, the write-once freeze
+    stamp of first dispatch (stamped inside `freezeAndLoadDispatch`'s transaction, deliberately
+    exempt from the `updated_*` rule, never cleared — not even when the dispatch then fails). A
+    frozen run never changes its user-attachment snapshot; more work is a copy, revision, or
+    simulation; run lineage is derived by `workflow_run_facts`, never stored.
 
 ## Testing
 
@@ -408,18 +469,29 @@ suite alone: `npm run test -- src/infrastructure/db/Db.test.ts` (plus `test:watc
   activity call; the happy path needs a live activity proxy).
 - `Db.test.ts` — ledger semantics (revive, convergence, idempotent completion, derived origin,
   reverse-edge lineage, input edges), hygiene semantics (first-filer `created_*`, stamped
-  updates, promotion provenance, dormant `deleted_at`, principal guards at every write boundary)
-  and publish semantics (mirror rewrite, validation gating, guarded republish stamps, snapshot
-  ordering, display fallback). `Principal.test.ts` pins the principal grammar itself.
+  updates, promotion provenance, dormant `deleted_at`, principal guards at every write boundary),
+  publish semantics (mirror rewrite, validation gating, guarded republish stamps, snapshot
+  ordering, display fallback), and lineage/freeze semantics (the `resolveLineageKind` matrix,
+  `createWorkflowRun`'s copy gates, `freezeAndLoadDispatch`'s guard-before-stamp order and
+  set-once no-`updated_*` stamp, RUN_FROZEN on user attach/promote/detach with engine
+  attach-back exempt, the `workflow_run_facts` derivations and CHECK violations).
+  `Principal.test.ts` pins the principal grammar itself.
 - `TaxDemoNodes.test.ts` — node bodies as pure functions against `sample_docs/`, byte-exact
   golden reports, the manifest/vocabulary/rename assertions.
 - `ApiCrud.test.ts` — the API over a real app + scratch db with a stub `TemporalGateway`:
   catalog shape, upload/attach/revive, supply guard, canonical_json convergence, origins, the
   hygiene wire surface (stamps exposed, `deleted_at` never, the member `added_*` alias, stable
-  first-attach member order across promotion).
-- `ApiIntegration.test.ts` — the full story over real Temporal Cloud; auto-skipped without
-  `TEMPORAL_API_KEY` in `backend/.env`. This is the only coverage of the dispatch path and live
-  memo replay; its memo-hit counts are the regression suite for the memo-key formula.
+  first-attach member order across promotion), and the lineage/freeze wire surface (the wire
+  lineage matrix, copyability 409s for drafts and running parents vs copyable completed AND
+  failed ones, freeze 409s on attach/detach/upload-attach with the artifact never filed on a
+  rejected upload-attach, PATCH `{workflow_id}` silently stripped with `updated_at` still null,
+  the RUN_FROZEN execute → 409 mapping).
+- `ApiIntegration.test.ts` — the full story over real Temporal Cloud (re-executing a completed
+  run → 409, then a no-change revision replaying entirely from memo — zero executed node
+  bodies — plus the attach-on-frozen probe); auto-skipped without `TEMPORAL_API_KEY` in
+  `backend/.env`. This is the only coverage of the dispatch path — including the
+  ALLOW_DUPLICATE_FAILED_ONLY reuse policy — and live memo replay; its memo-hit counts are the
+  regression suite for the memo-key formula.
 
 ## Known accepted gaps (decisions, not oversights)
 
@@ -436,6 +508,10 @@ suite alone: `npm run test -- src/infrastructure/db/Db.test.ts` (plus `test:watc
 - `TEMPORAL_TASK_QUEUE` defaults to a personal dev queue name (Env.ts); the env var is the sole
   dispatch truth, so set it deliberately per deployment.
 - The one-node-one-file check is existence-only (no source parsing since the codegen died).
+- A crash between the freeze stamp and the Temporal start leaves a frozen-but-idle run
+  (`executed_at` set, status `idle`, `describeRun` → null); recovery is re-executing it
+  (describe finds nothing → start) — there is no auto-unwedger, and copying such a parent is
+  refused with RUN_NOT_COPYABLE until an execution reaches a terminal state.
 - Temporal histories survive a db reset; `seed --fresh` terminates the old instance's open runs,
   `scripts/cleanup-temporal.ts` does the same for e2e stacks.
 
@@ -459,13 +535,16 @@ npm run seed -- --fresh    # reset db + payload store, terminate stale runs, see
 npm run dev                # the API on :8000 (+ embedded worker)
 ```
 
-The seed dataset (`cmdSeed` in backend/src/cli/Seed.ts): engagement "Acme Ltd" with workspace
+The seed dataset (`cmdSeed` in backend/src/cli/Seed.ts): engagement "Acme Ltd" with workflow run
 "January estimate" (`tax_demo_workflow`, six sample docs, executed to completion — the auto-
-approver answers the verify tasks) and "February estimate" (a copy of January plus two extra
-docs, deliberately NOT executed — the staged memo-reuse demo); engagement "Blue Harbour LLP"
-with "Q1 estimate" (`tax_demo_workflow_v2`, including the canonicalized residency
-questionnaire), started and left waiting on two open `verify_txns` tasks — the live human-task
-fixture.
+approver answers the verify tasks — and therefore frozen) and "February estimate" (a `copy` of
+January plus two extra docs, deliberately NOT executed — the staged memo-reuse demo; the copy is
+legal because January's execution completed); engagement "Blue Harbour LLP" with "Q1 estimate"
+(`tax_demo_workflow_v2`, including the canonicalized residency questionnaire), started and left
+waiting on two open `verify_txns` tasks — the live human-task fixture, which doubles as the live
+"uncopyable while running" fixture (copy it → 409 RUN_NOT_COPYABLE). The demo (`cmdDemo`, same
+file) tells the lineage story end to end: scenario 2 re-runs January as a no-change `revision`
+and asserts zero node bodies execute — the memo holds across the family.
 
 `npm run cli -- <cmd>` also offers `init | worker | tasks | submit <task-workflow-id> |
 show <workflow_run_id> | download <artifact_id> <out>`. `submit` auto-approves a `verify_txns`

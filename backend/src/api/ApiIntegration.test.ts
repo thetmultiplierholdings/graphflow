@@ -23,15 +23,23 @@ import { buildApp } from './App.js';
 import type { ApiDeps } from './Deps.js';
 import { createTemporalGateway } from './Deps.js';
 import type { ExecuteOut, HumanTaskOut, StatusOut, UploadOut } from './Schemas.js';
-import type { ArtifactMetaOut, EngagementOut, WorkspaceDetailOut } from './Serializers.js';
+import type { ArtifactMetaOut, EngagementOut, WorkflowRunDetailOut, WorkflowRunListOut } from './Serializers.js';
 
 // The full story through HTTP over REAL Temporal Cloud:
-// create → upload → execute (202) → verify tasks open → malformed answers rejected (422, task
-// stays open) → approve via the API → completed → report totals exact → re-execute is a pure memo
-// replay (0 executed, 7 memo hits) → copy + 1 extra doc → only the marginal chain + fold/calc/
-// report execute. Real fetch against a listening app with the real embedded worker ON; scratch
-// db/storage and a UNIQUE task queue per run; every Temporal workflow started under the scratch
-// instance prefix is terminated on teardown.
+// create → upload → execute twice concurrently (both 202, ONE execution — USE_EXISTING) → verify
+// tasks open → a sequential re-execute of the RUNNING run attaches (202, SAME id, still running)
+// → the dispatched run is frozen + a running parent is uncopyable (409, and the refusal files no
+// run row) → malformed answers rejected (422, task stays open) → approve via the API → completed
+// → report totals exact → re-execute of the completed run refuses (409 RUN_FROZEN, ledger
+// untouched — the describe fast path; the start policies themselves are unit-pinned in
+// ../temporal/Runtime.test.ts) → freeze probe (attach / upload-with-attach 409, nothing filed) →
+// a revision executes as a pure memo replay (0 executed, 7 memo hits) → copy + 1 extra doc → only
+// the marginal chain + fold/calc/report execute → frozen-but-idle recovery (hand-stamped
+// executed_at reads idle; execute heals it without re-stamping) → terminate-then-retry (a
+// TERMINATED execution re-dispatches in place under the SAME id, row still frozen). Real fetch
+// against a listening app with the real embedded worker ON; scratch db/storage and a UNIQUE task
+// queue per run; every Temporal workflow started under the scratch instance prefix is terminated
+// on teardown.
 
 // Load .env exactly like the app does (Env.loadEnv: tolerate absence, shell wins) BEFORE the
 // skip decision — CI without credentials skips cleanly.
@@ -182,6 +190,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
     let taskQueue = '';
     let instance = '';
     let baseUrl = '';
+    let env: Env | undefined;
     let client: Client | undefined;
     let worker: WorkerHandle | undefined;
     let workerRun: Promise<void> | undefined;
@@ -197,7 +206,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       // queue keeps our workflow/activity tasks on OUR worker only.
       taskQueue = `graphflow-it-${token}`;
 
-      const env: Env = {
+      env = {
         ...parseEnv(process.env),
         temporalTaskQueue: taskQueue,
         dbPath,
@@ -378,7 +387,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
         await delay(2000);
       }
       throw new RuntimeError(
-        `timed out after ${TASKS_DEADLINE_MS / 1000}s waiting for ${count} open verify task(s) of workspace ${workflowRunId}; last saw ${tasks.length}`
+        `timed out after ${TASKS_DEADLINE_MS / 1000}s waiting for ${count} open verify task(s) of workflow run ${workflowRunId}; last saw ${tasks.length}`
       );
     }
 
@@ -398,7 +407,7 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
         await delay(2000);
       }
       throw new RuntimeError(
-        `timed out after ${RUN_DEADLINE_MS / 1000}s waiting for workspace ${workflowRunId} status '${want}'; last ${JSON.stringify(last)}`
+        `timed out after ${RUN_DEADLINE_MS / 1000}s waiting for workflow run ${workflowRunId} status '${want}'; last ${JSON.stringify(last)}`
       );
     }
 
@@ -452,14 +461,14 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
         await delay(2000); // empty snapshot: the progress query raced — retry the whole stream
       }
       throw new RuntimeError(
-        `no usable progress snapshot for workspace ${workflowRunId} after ${attempts} attempts (last error: ${lastError})`
+        `no usable progress snapshot for workflow run ${workflowRunId} after ${attempts} attempts (last error: ${lastError})`
       );
     }
 
     // ---------- the story ----------
 
     it('full story over real Temporal', { timeout: 600_000 }, async () => {
-      // 1. engagement + workspace + 1 brokerage statement + 1 payment slip
+      // 1. engagement + workflow run (born a root, unfrozen) + 1 brokerage statement + 1 payment slip
       const engRes = await postJson('/engagements', { display_name: 'vitest — API integration' });
       await expectStatus(engRes, 200);
       const eng = (await readJson<EngagementOut>(engRes)).engagement_id;
@@ -469,16 +478,28 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
         display_name: 'March estimate',
       });
       await expectStatus(wsRes, 200);
-      const ws = (await readJson<WorkspaceDetailOut>(wsRes)).workflow_run_id;
+      const wsDetail = await readJson<WorkflowRunDetailOut>(wsRes);
+      const ws = wsDetail.workflow_run_id;
+      expect(wsDetail.lineage_kind).toBe('root');
+      expect(wsDetail.executed_at).toBeNull();
 
       const docs = [join(SAMPLE_DOCS, 'morgan_stanley.txt'), join(SAMPLE_DOCS, 'payslip_jan.txt')];
-      await uploadDoc(eng, docs[0], 'brokerage_statement', ws);
-      await uploadDoc(eng, docs[1], 'payment_slip', ws);
+      const stmt = await uploadDoc(eng, docs[0], 'brokerage_statement', ws);
+      const slip = await uploadDoc(eng, docs[1], 'payment_slip', ws);
+      const userDocIds = [stmt.artifact_id, slip.artifact_id].sort((a, b) => a - b);
 
-      // 2. execute -> 202; poll until the 2 verify tasks open
-      const execRes = await fetch(`${baseUrl}/workflow-runs/${ws}/execute`, { method: 'POST' });
+      // 2. execute twice CONCURRENTLY -> both 202 with the SAME temporal id. Only this suite can
+      // pin workflowIdConflictPolicy USE_EXISTING: the real server dedupes the double-click into
+      // one execution (a FAIL policy would bounce the second request as AlreadyStarted -> 409).
+      const [execRes, execAgainRes] = await Promise.all([
+        fetch(`${baseUrl}/workflow-runs/${ws}/execute`, { method: 'POST' }),
+        fetch(`${baseUrl}/workflow-runs/${ws}/execute`, { method: 'POST' }),
+      ]);
       await expectStatus(execRes, 202);
-      expect((await readJson<ExecuteOut>(execRes)).temporal_workflow_id.startsWith('wfrun-')).toBe(true);
+      await expectStatus(execAgainRes, 202);
+      const execOut = await readJson<ExecuteOut>(execRes);
+      expect(execOut.temporal_workflow_id.startsWith('wfrun-')).toBe(true);
+      expect((await readJson<ExecuteOut>(execAgainRes)).temporal_workflow_id).toBe(execOut.temporal_workflow_id);
 
       const tasks = await pollTasks(eng, 2, ws);
       expect(tasks).toHaveLength(2);
@@ -490,6 +511,41 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
         expect(OcrPayloadSchema.safeParse(t.payload).success).toBe(true);
         expect(t.instructions).toBeTruthy();
       }
+
+      // The RUNNING → proceed branch, sequentially: while the run is parked on humans, a plain
+      // re-execute attaches to the LIVE execution (describe says RUNNING → no 409; USE_EXISTING
+      // finds it) — 202, the SAME temporal id, and the run keeps waiting. A gate that refused
+      // ANY found execution (not just COMPLETED) would bounce this request.
+      const attachExecRes = await fetch(`${baseUrl}/workflow-runs/${ws}/execute`, { method: 'POST' });
+      await expectStatus(attachExecRes, 202);
+      expect((await readJson<ExecuteOut>(attachExecRes)).temporal_workflow_id).toBe(execOut.temporal_workflow_id);
+      const stillRunningRes = await fetch(`${baseUrl}/workflow-runs/${ws}/status`);
+      await expectStatus(stillRunningRes, 200);
+      expect((await readJson<StatusOut>(stillRunningRes)).status).toBe('running');
+
+      // The dispatch froze the row: executed_at stamps at FIRST dispatch, not at completion…
+      const midDetailRes = await fetch(`${baseUrl}/workflow-runs/${ws}`);
+      await expectStatus(midDetailRes, 200);
+      expect((await readJson<WorkflowRunDetailOut>(midDetailRes)).executed_at).not.toBeNull();
+
+      // …and a RUNNING parent is uncopyable — the copyability gate consults the REAL describe.
+      const runsBeforeCopyRes = await fetch(`${baseUrl}/engagements/${eng}/workflow-runs`);
+      await expectStatus(runsBeforeCopyRes, 200);
+      const runsBeforeCopy = (await readJson<WorkflowRunListOut[]>(runsBeforeCopyRes)).length;
+      const eagerCopyRes = await postJson(`/engagements/${eng}/workflow-runs`, {
+        workflow_id: 'tax_demo_workflow',
+        display_name: 'too eager',
+        copy_from: ws,
+      });
+      await expectStatus(eagerCopyRes, 409);
+      expect((await readJson<{ detail: string }>(eagerCopyRes)).detail).toBe(
+        `workflow run ${ws} is still running — wait for it to finish before copying`
+      );
+      // The refusal filed NOTHING: the gate answers before Phase B's create, so no phantom row
+      // may appear in the engagement's run list (pins against a create-before-gate reorder).
+      const runsAfterCopyRes = await fetch(`${baseUrl}/engagements/${eng}/workflow-runs`);
+      await expectStatus(runsAfterCopyRes, 200);
+      expect((await readJson<WorkflowRunListOut[]>(runsAfterCopyRes)).length).toBe(runsBeforeCopy);
 
       // 3. NEGATIVE — the answer contract. Malformed rows -> 422, task stays open.
       const badRes = await postJson(`/human-tasks/${tasks[0].task_id}/submit`, {
@@ -539,12 +595,12 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
 
       const detailRes = await fetch(`${baseUrl}/workflow-runs/${ws}`);
       await expectStatus(detailRes, 200);
-      const reports = (await readJson<WorkspaceDetailOut>(detailRes)).members.filter(
+      const reports = (await readJson<WorkflowRunDetailOut>(detailRes)).members.filter(
         (m) => m.nodeparamslot === 'final_report'
       );
       const lastReport = reports.at(-1);
       if (lastReport === undefined) {
-        throw new RuntimeError('workspace members must contain the final_report');
+        throw new RuntimeError('workflow run members must contain the final_report');
       }
       const reportRes = await fetch(`${baseUrl}/artifacts/${lastReport.artifact_id}/content`);
       await expectStatus(reportRes, 200);
@@ -553,10 +609,75 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       expect(got.total).toBe(expected.total);
       expect(got.tax).toBe(expected.tax);
 
-      // 6. re-execute: a pure memo replay — zero node bodies, zero humans disturbed
+      // 6. the completed run refuses to re-execute: 409 RUN_FROZEN — a business run happens at
+      // most once. This pins the describe FAST PATH only: it answers before the start call, so
+      // the reuse policy is never consulted here. RUN_START_POLICIES + rethrowStartError (the
+      // atomic arbiter behind the fast path) are unit-pinned in ../temporal/Runtime.test.ts, and
+      // the server's start-after-FAILED half is pinned by the terminate-then-retry step below.
+      // The ledger must not move: a 409 that still re-dispatched would shift engagement stats.
+      const statsBeforeRes = await fetch(`${baseUrl}/engagements/${eng}`);
+      await expectStatus(statsBeforeRes, 200);
+      const statsBefore = (await readJson<EngagementOut>(statsBeforeRes)).stats;
+
       const rerunRes = await fetch(`${baseUrl}/workflow-runs/${ws}/execute`, { method: 'POST' });
-      await expectStatus(rerunRes, 202);
-      const progress = await readProgress(ws);
+      await expectStatus(rerunRes, 409);
+      expect((await readJson<{ detail: string }>(rerunRes)).detail).toBe(
+        `workflow run ${ws} has already completed — create a copy or revision to run it again`
+      );
+
+      const statsAfterRes = await fetch(`${baseUrl}/engagements/${eng}`);
+      await expectStatus(statsAfterRes, 200);
+      expect((await readJson<EngagementOut>(statsAfterRes)).stats).toEqual(statsBefore);
+
+      // Freeze probe: user attach of an existing member -> 409; upload-with-attach -> 409 AND the
+      // rejected upload files NOTHING (the route checks frozen BEFORE supplyArtifact).
+      const frozenDetail = `workflow run ${ws} is frozen (already executed) — attachments can no longer change; create a copy or revision`;
+      const frozenAttachRes = await postJson(`/workflow-runs/${ws}/attachments`, { artifact_id: stmt.artifact_id });
+      await expectStatus(frozenAttachRes, 409);
+      expect((await readJson<{ detail: string }>(frozenAttachRes)).detail).toBe(frozenDetail);
+
+      const poolBeforeRes = await fetch(`${baseUrl}/engagements/${eng}/artifacts`);
+      await expectStatus(poolBeforeRes, 200);
+      const poolBefore = (await readJson<ArtifactMetaOut[]>(poolBeforeRes)).length;
+      const frozenForm = new FormData();
+      frozenForm.append('nodeparamslot', 'brokerage_statement');
+      frozenForm.append('workflow_run_id', String(ws));
+      frozenForm.append('file', new Blob(['2026-03-03 | REJECTED | 1.00'], { type: 'text/plain' }), 'rejected.txt');
+      const frozenUploadRes = await fetch(`${baseUrl}/engagements/${eng}/artifacts`, {
+        method: 'POST',
+        body: frozenForm,
+      });
+      await expectStatus(frozenUploadRes, 409);
+      expect((await readJson<{ detail: string }>(frozenUploadRes)).detail).toBe(frozenDetail);
+      const poolAfterRes = await fetch(`${baseUrl}/engagements/${eng}/artifacts`);
+      await expectStatus(poolAfterRes, 200);
+      expect((await readJson<ArtifactMetaOut[]>(poolAfterRes)).length).toBe(poolBefore);
+
+      // 7. more work on a frozen run is a copy — here a REVISION: same workflow, extends the
+      // root's family. Executing it is a pure memo replay — zero node bodies, zero humans
+      // disturbed (lineage_kind must never leak into memo keys).
+      const revRes = await postJson(`/engagements/${eng}/workflow-runs`, {
+        workflow_id: 'tax_demo_workflow',
+        display_name: 'March estimate — second pass',
+        copy_from: ws,
+        lineage_kind: 'revision',
+      });
+      await expectStatus(revRes, 200);
+      const revDetail = await readJson<WorkflowRunDetailOut>(revRes);
+      const rev = revDetail.workflow_run_id;
+      expect(revDetail.lineage_kind).toBe('revision');
+      expect(revDetail.copied_from_workflow_run).toBe(ws);
+      expect(revDetail.root_workflow_run_id).toBe(ws);
+      expect(revDetail.lineage_byid).toBe(`${ws}/${rev}`);
+      expect(revDetail.lineage_display).toBe('March estimate/March estimate — second pass');
+      expect(revDetail.executed_at).toBeNull(); // born unfrozen — the parent's freeze is not inherited
+      expect(revDetail.members).toHaveLength(2);
+      expect(revDetail.members.every((m) => m.source === 'user')).toBe(true);
+      expect(revDetail.members.map((m) => m.artifact_id).sort((a, b) => a - b)).toEqual(userDocIds);
+
+      const revExecRes = await fetch(`${baseUrl}/workflow-runs/${rev}/execute`, { method: 'POST' });
+      await expectStatus(revExecRes, 202);
+      const progress = await readProgress(rev);
       expect(progress.status).toBe('completed');
       expect(progress.executed).toEqual([]);
       expect(progress.human_waits).toEqual([]);
@@ -572,15 +693,45 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       ]);
       expect(progress.memo_hits.filter((nodeId) => nodeId === 'verify_txns')).toHaveLength(2);
 
-      // 7. copy the workspace + ONE extra statement: only the marginal work runs
+      // Engine attach-back refilled the revision's own pinboard; both user sets stay the copies.
+      const revAfterRes = await fetch(`${baseUrl}/workflow-runs/${rev}`);
+      await expectStatus(revAfterRes, 200);
+      const revAfter = await readJson<WorkflowRunDetailOut>(revAfterRes);
+      expect(revAfter.executed_at).not.toBeNull();
+      expect(revAfter.members.filter((m) => m.source === 'engine').length).toBeGreaterThan(0);
+      expect(
+        revAfter.members
+          .filter((m) => m.source === 'user')
+          .map((m) => m.artifact_id)
+          .sort((a, b) => a - b)
+      ).toEqual(userDocIds);
+      const wsAfterRes = await fetch(`${baseUrl}/workflow-runs/${ws}`);
+      await expectStatus(wsAfterRes, 200);
+      const wsAfter = await readJson<WorkflowRunDetailOut>(wsAfterRes);
+      expect(
+        wsAfter.members
+          .filter((m) => m.source === 'user')
+          .map((m) => m.artifact_id)
+          .sort((a, b) => a - b)
+      ).toEqual(userDocIds);
+
+      // 8. copy the run + ONE extra statement: only the marginal work runs
       const copyRes = await postJson(`/engagements/${eng}/workflow-runs`, {
         workflow_id: 'tax_demo_workflow',
         display_name: 'April estimate',
         copy_from: ws,
       });
       await expectStatus(copyRes, 200);
-      const copyDetail = await readJson<WorkspaceDetailOut>(copyRes);
+      const copyDetail = await readJson<WorkflowRunDetailOut>(copyRes);
       const ws2 = copyDetail.workflow_run_id;
+      // copy_from without an explicit kind defaults to 'copy' — family-STARTING: own-rooted with
+      // parenthood preserved (unlike the revision above, which extends the parent's family).
+      expect(copyDetail.lineage_kind).toBe('copy');
+      expect(copyDetail.copied_from_workflow_run).toBe(ws);
+      expect(copyDetail.root_workflow_run_id).toBe(ws2);
+      expect(copyDetail.lineage_byid).toBe(String(ws2));
+      expect(copyDetail.lineage_display).toBe('April estimate');
+      expect(copyDetail.executed_at).toBeNull();
       expect(copyDetail.members).toHaveLength(2);
       expect(copyDetail.members.every((m) => m.source === 'user')).toBe(true);
 
@@ -618,12 +769,12 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       // and the new report total includes the extra document
       const detail2Res = await fetch(`${baseUrl}/workflow-runs/${ws2}`);
       await expectStatus(detail2Res, 200);
-      const reports2 = (await readJson<WorkspaceDetailOut>(detail2Res)).members.filter(
+      const reports2 = (await readJson<WorkflowRunDetailOut>(detail2Res)).members.filter(
         (m) => m.nodeparamslot === 'final_report'
       );
       const lastReport2 = reports2.at(-1);
       if (lastReport2 === undefined) {
-        throw new RuntimeError('workspace members must contain the final_report');
+        throw new RuntimeError('workflow run members must contain the final_report');
       }
       const report2Res = await fetch(`${baseUrl}/artifacts/${lastReport2.artifact_id}/content`);
       await expectStatus(report2Res, 200);
@@ -632,6 +783,98 @@ describe.skipIf(process.env.TEMPORAL_API_KEY === undefined || process.env.TEMPOR
       expect(got2.total).toBe(expected2.total);
       expect(got2.tax).toBe(expected2.tax);
       expect(got2.total).not.toBe(got.total); // the extra document moved the number
+
+      // 9. frozen-but-idle recovery: a crash between the freeze COMMIT and the Temporal start
+      // leaves executed_at set with NO execution behind it. The wire shows exactly that split
+      // (status 'idle', executed_at set), and a plain re-execute heals it (describe -> not-found
+      // -> freeze no-op -> start) WITHOUT re-stamping: executed_at is write-once, so the hand
+      // sentinel must survive the successful dispatch.
+      const recRes = await postJson(`/engagements/${eng}/workflow-runs`, {
+        workflow_id: 'tax_demo_workflow',
+        display_name: 'Recovery estimate',
+      });
+      await expectStatus(recRes, 200);
+      const rec = (await readJson<WorkflowRunDetailOut>(recRes)).workflow_run_id;
+      for (const artifactId of userDocIds) {
+        const attachRes = await postJson(`/workflow-runs/${rec}/attachments`, { artifact_id: artifactId });
+        await expectStatus(attachRes, 204);
+      }
+      const sentinel = '2020-01-01T00:00:00+00:00';
+      const conn = connect(dbPath);
+      try {
+        conn.prepare('UPDATE workflow_runs SET executed_at=? WHERE workflow_run_id=?').run(sentinel, rec);
+      } finally {
+        conn.close();
+      }
+      const idleStatusRes = await fetch(`${baseUrl}/workflow-runs/${rec}/status`);
+      await expectStatus(idleStatusRes, 200);
+      expect(await readJson<StatusOut>(idleStatusRes)).toEqual({ status: 'idle', error: null });
+      const idleDetailRes = await fetch(`${baseUrl}/workflow-runs/${rec}`);
+      await expectStatus(idleDetailRes, 200);
+      expect((await readJson<WorkflowRunDetailOut>(idleDetailRes)).executed_at).toBe(sentinel);
+
+      const healRes = await fetch(`${baseUrl}/workflow-runs/${rec}/execute`, { method: 'POST' });
+      await expectStatus(healRes, 202);
+      const recProgress = await readProgress(rec);
+      expect(recProgress.status).toBe('completed');
+      expect(recProgress.executed).toEqual([]);
+      expect(recProgress.human_waits).toEqual([]);
+      expect(recProgress.memo_hits).toHaveLength(7); // same doc set as the root -> full replay
+      const healedRes = await fetch(`${baseUrl}/workflow-runs/${rec}`);
+      await expectStatus(healedRes, 200);
+      expect((await readJson<WorkflowRunDetailOut>(healedRes)).executed_at).toBe(sentinel);
+
+      // 10. terminate → retry IN PLACE: an execution closed in a non-completed terminal state
+      // re-dispatches under the SAME temporal id (describe sees TERMINATED → proceed;
+      // workflowIdReusePolicy ALLOW_DUPLICATE_FAILED_ONLY admits a fresh execution over a failed
+      // id) — the server-side half the rerun-409 above never reaches. A REJECT_DUPLICATE
+      // regression, or a fast path broadened to refuse any closed state, would 409/500 the
+      // retry. A never-before-seen document guarantees a genuinely waiting run to kill, and the
+      // row must stay frozen through failure and retry (executed_at is write-once).
+      const termRes = await postJson(`/engagements/${eng}/workflow-runs`, {
+        workflow_id: 'tax_demo_workflow',
+        display_name: 'Terminated estimate',
+      });
+      await expectStatus(termRes, 200);
+      const term = (await readJson<WorkflowRunDetailOut>(termRes)).workflow_run_id;
+      await uploadDoc(eng, join(SAMPLE_DOCS, 'goldman_sachs.txt'), 'brokerage_statement', term);
+
+      const termExecRes = await fetch(`${baseUrl}/workflow-runs/${term}/execute`, { method: 'POST' });
+      await expectStatus(termExecRes, 202);
+      const termWfId = (await readJson<ExecuteOut>(termExecRes)).temporal_workflow_id;
+      await pollTasks(eng, 1, term); // parked on its own verify task — genuinely waiting
+      await pollStatus(term, 'running');
+      const termFrozenRes = await fetch(`${baseUrl}/workflow-runs/${term}`);
+      await expectStatus(termFrozenRes, 200);
+      const termExecutedAt = (await readJson<WorkflowRunDetailOut>(termFrozenRes)).executed_at;
+      expect(termExecutedAt).not.toBeNull();
+
+      if (env === undefined) {
+        throw new RuntimeError('env is assigned in beforeAll');
+      }
+      // A dedicated client for the out-of-band kill — the API must never offer such a path.
+      const directClient = await connectClient(env);
+      try {
+        await directClient.workflow.getHandle(termWfId).terminate('test: simulated infra failure');
+        await pollStatus(term, 'failed');
+        const termFailedRes = await fetch(`${baseUrl}/workflow-runs/${term}`);
+        await expectStatus(termFailedRes, 200);
+        expect((await readJson<WorkflowRunDetailOut>(termFailedRes)).executed_at).toBe(termExecutedAt);
+
+        const retryRes = await fetch(`${baseUrl}/workflow-runs/${term}/execute`, { method: 'POST' });
+        await expectStatus(retryRes, 202);
+        expect((await readJson<ExecuteOut>(retryRes)).temporal_workflow_id).toBe(termWfId);
+        // A FRESH execution under the SAME id: memo-replays to the still-open verify task and
+        // waits there again — infra noise never minted a business revision.
+        await pollStatus(term, 'running');
+
+        await directClient.workflow.getHandle(termWfId).terminate('test cleanup');
+      } finally {
+        await directClient.connection.close();
+      }
+      const termAfterRes = await fetch(`${baseUrl}/workflow-runs/${term}`);
+      await expectStatus(termAfterRes, 200);
+      expect((await readJson<WorkflowRunDetailOut>(termAfterRes)).executed_at).toBe(termExecutedAt);
     });
   }
 );

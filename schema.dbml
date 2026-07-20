@@ -7,10 +7,12 @@
 //     a +00:00 suffix at seconds precision (nowIso in Db.ts) — lexicographic order == time order.
 //   - executor / source columns are TEXT with CHECK constraints in SQLite; modeled as enums here.
 //   - LEDGER tables (artifacts, node_runs, node_run_inputs) are insert-only; the mutable ledger
-//     columns are artifacts.display_name and its updated_by/updated_at stamps. WORKSPACE rows are
-//     editable; deleting a workflow_run_artifacts row (detach) is the only user-facing DELETE —
-//     the other DELETEs are the publish transaction rewriting the workflow_nodeparamslots and
-//     node_input_nodeparamslots mirrors.
+//     columns are artifacts.display_name and its updated_by/updated_at stamps. WORKFLOW-RUN rows
+//     are editable only until frozen (executed_at, stamped at first dispatch): user attach/detach
+//     then reject with RUN_FROZEN, while engine attach-back continues and display_name/archive
+//     stay editable. Deleting a workflow_run_artifacts row (detach) is the only user-facing
+//     DELETE — the other DELETEs are the publish transaction rewriting the
+//     workflow_nodeparamslots and node_input_nodeparamslots mirrors.
 //   - HYGIENE BLOCK, tiered per table role:
 //       . entity tables (engagements, artifacts, workflow_runs): created_by/created_at NOT NULL +
 //         nullable updated_by/updated_at/deleted_at;
@@ -25,8 +27,11 @@
 //     Semantics: created_* is the FIRST filer — convergence (ON CONFLICT DO NOTHING) never
 //     re-dates it; updated_* is NULL until first updated — the idempotent paths (promote upsert,
 //     publish upserts) are guarded so a no-op never stamps, while the request-driven UPDATEs
-//     (rename, workspace PATCH/archive) stamp per request, so resubmitting an identical value
-//     re-stamps; deleted_at is DORMANT — always NULL, no reader filters on it,
+//     (rename, workflow-run PATCH/archive) stamp per request, so resubmitting an identical value
+//     re-stamps. ONE deliberate exemption: the executed_at freeze stamp (freezeAndLoadDispatch
+//     in Db.ts) does NOT stamp updated_* — executed_at is itself the write-once audit stamp of
+//     the dispatch event, and the dispatch path has no attributable actor.
+//     deleted_at is DORMANT — always NULL, no reader filters on it,
 //     reserved for a future soft delete. Known trap for that future: a soft-deleted artifact row
 //     would still block re-supplying identical bytes (the DO-NOTHING conflict lands on the
 //     tombstoned row), so implementing delete means deciding revive-vs-hide first.
@@ -38,25 +43,38 @@
 //     PRAGMA foreign_keys=ON (connect in Db.ts). There are no deferred or circular FKs: a
 //     node_runs row is inserted after its output artifact, and SQLite assigns node_run_id.
 //   - No migrations yet (greenfield): initDb is CREATE IF NOT EXISTS only; schema changes ship
-//     as a reset (npm run seed -- --fresh). This change REQUIRES that reset: booting new code
-//     against a pre-hygiene db fails loud in publishCatalog on the missing columns.
+//     as a reset (npm run seed -- --fresh). The lineage/freeze change makes that reset a
+//     CORRECTNESS precondition, not hygiene: pre-existing parked executions predate the freeze
+//     semantics and the retired snapshot-drift check. Booting new code against a stale db fails
+//     loud in initDb (the workflow_run_facts probe hits the missing columns).
 
 Project graphflow {
   database_type: 'SQLite'
   Note: '''
-  Content-addressed computation ledger + editable workspaces + a CI-published catalog mirror.
-  SQLite is single-writer; every application write transaction uses BEGIN IMMEDIATE (initDb's
-  one-time DDL and instance_id insert run in autocommit).
+  Content-addressed computation ledger + editable-until-frozen workflow runs + a CI-published
+  catalog mirror. SQLite is single-writer; every application write transaction uses BEGIN
+  IMMEDIATE (initDb's one-time DDL and instance_id insert run in autocommit).
 
   READ MODEL (not a table): artifact_facts — a view over artifacts JOIN nodeparamslots adding two DERIVED
   columns served on the wire: produced_by_node_run := MIN(node_run_id) over
   node_runs.output_artifact_id (several runs can converge on one artifact via the completion
   transaction's ON CONFLICT DO NOTHING; the earliest run wins), and origin := 'produced' when a
   producing run exists, else 'override' for a hand-supplied computed nodeparamslot, else the nodeparamslot's
-  authored source. Read models (getArtifact, browseArtifacts, workspaceArtifacts, the API
+  authored source. Read models (getArtifact, browseArtifacts, workflowRunArtifacts, the API
   serializers) read the view; the memo and write path (memoLookup, recordCompletion,
   supplyArtifact) stays on base tables. Provenance is derived, never stored — nothing can
   diverge from lineage.
+
+  READ MODEL (not a table): workflow_run_facts — the same doctrine for run lineage. A recursive
+  walk over copied_from_workflow_run derives, per run: root_workflow_run_id (the family root — a
+  FAMILY starts at a 'root' or 'copy' run and extends through 'revision'/'simulation' children;
+  the boundary is the CHILD row's own lineage_kind), lineage_depth, lineage_byid (the
+  family-root-to-self id path, '/'-joined; the root's own is its bare id, so a family's
+  DESCENDANTS grep with LIKE '<root>/%' — add OR lineage_byid = '<root>' to include the root),
+  and lineage_display (descendants: root display_name '/' own display_name; family-start rows
+  show just their own name). Recomputed on every read, so renaming the family root flows
+  through instantly. getWorkflowRun/listWorkflowRuns read the view; every write path stays on
+  base tables.
   '''
 }
 
@@ -104,7 +122,7 @@ Table engagements {
 
 // ---------- CATALOG (mirror of the in-code registry, republished by publishCatalog on every
 // boot/init after validateCatalog passes. nodeparamslots/workflows/nodes are upsert-only — retired rows
-// persist as FK parents, and executing a workspace pinned to a retired workflow fails loud —
+// persist as FK parents, and executing a workflow run pinned to a retired workflow fails loud —
 // the run starts, then GraphflowRun throws non-retryable "not registered on this worker"
 // (Workflows.ts) — instead of vanishing — while workflow_nodeparamslots and node_input_nodeparamslots are rewritten
 // delete-then-insert inside the publish transaction, so declarations removed from code stop
@@ -124,7 +142,7 @@ Table workflows {
   display_name text [not null]
   created_at text [not null, note: 'first publish']
   updated_at text [note: 'last real change to THIS row\'s columns, i.e. display_name (guarded upsert) — node/nodeparamslot edits bump their own rows, not this; served on /catalog, git stays the full audit trail']
-  Note: 'Catalog row per authored workflow version — identity + display ONLY. Dispatch metadata lives nowhere in the db: every run starts as the RUN_WORKFLOW_TYPE constant on the env task queue (startWorkspace in Runtime.ts), so run and recovery sweeps agree by construction. The DAG itself is code (the workflow folder\'s run()).'
+  Note: 'Catalog row per authored workflow version — identity + display ONLY. Dispatch metadata lives nowhere in the db: every run starts as the RUN_WORKFLOW_TYPE constant on the env task queue (startWorkflowRun in Runtime.ts), so run and recovery sweeps agree by construction. The DAG itself is code (the workflow folder\'s run()). workflow_runs.workflow_id is immutable after create: asking for a different DAG is a root-class copy, never a re-point.'
 }
 
 Table workflow_nodeparamslots {
@@ -200,7 +218,7 @@ Table node_runs {
     (engagement_id, memo_key) [unique]
     output_artifact_id [name: 'idx_reverse_lineage']
   }
-  Note: 'The memo / constructive-trace store: one row per DISTINCT answered question, not per execution — memo hits insert nothing here (they only add a workspace membership row), and run-button presses are not recorded in the db at all. UNIQUE (engagement_id, memo_key) is the final race tiebreak in recordCompletion.'
+  Note: 'The memo / constructive-trace store: one row per DISTINCT answered question, not per execution — memo hits insert nothing here (they only add a workflow-run membership row), and run-button presses are not recorded here; the only dispatch fact in the db is workflow_runs.executed_at (first dispatch only). UNIQUE (engagement_id, memo_key) is the final race tiebreak in recordCompletion.'
 }
 
 Ref: node_runs.(workflow_id, node_id) > nodes.(workflow_id, node_id)
@@ -215,14 +233,30 @@ Table node_run_inputs {
   Note: 'Provenance edges: which artifacts each computation consumed. Recorded as rows, deliberately excluded from identity (no Merkle recursion — history never enters a hash).'
 }
 
-// ---------- WORKSPACE (editable business layer; "workspace" in code and API) ----------
+// ---------- WORKFLOW RUN (the editable-until-frozen business layer) ----------
+
+// TEXT CHECK (lineage_kind IN (root, copy, revision, simulation)) in SQLite, plus the coupling
+// CHECK ((lineage_kind = 'root') = (copied_from_workflow_run IS NULL)) and the no-self-parent
+// CHECK (copied_from_workflow_run <> workflow_run_id) — together they make the
+// workflow_run_facts walk total and cycle-free. What a creation-from-parent MEANS: 'root' =
+// fresh; 'copy' starts a NEW family (may target a different workflow); 'revision'/'simulation'
+// extend the parent's family and must keep its workflow (enforced in createWorkflowRun). There
+// is no 'reissue' — a no-change revision covers re-running January in March.
+enum lineage_kind {
+  root
+  copy
+  revision
+  simulation
+}
 
 Table workflow_runs {
   workflow_run_id integer [pk]
   engagement_id integer [not null, ref: > engagements.engagement_id]
-  workflow_id text [not null, ref: > workflows.workflow_id]
+  workflow_id text [not null, ref: > workflows.workflow_id, note: 'immutable after create (PATCH lost it) — a different DAG is a root-class copy']
   display_name text [not null]
-  copied_from_workflow_run integer [ref: > workflow_runs.workflow_run_id, note: 'copy provenance; a copy carries only user-sourced attachments']
+  copied_from_workflow_run integer [ref: > workflow_runs.workflow_run_id, note: 'the parent, set once at create and never updated; a copy of any lineage_kind carries only user-sourced attachments. Copyability gate: the parent must be frozen (executed_at set) AND its Temporal execution terminal (completed or failed both count — the route describes at gate time; there is deliberately no completed_at column). Never-executed drafts and running parents are uncopyable.']
+  lineage_kind lineage_kind [not null, default: 'root', note: 'what this create MEANT (see the enum); with copied_from it is the whole stored lineage fact — root/paths are derived by workflow_run_facts, never stored']
+  executed_at text [note: 'the write-once freeze stamp: set at first dispatch inside freezeAndLoadDispatch\'s BEGIN IMMEDIATE (same tx as the snapshot read), never cleared — not even when the Temporal start then fails (recovery is re-execute, never unfreeze). Frozen = user attach/detach reject RUN_FROZEN; engine attach-back continues; display_name/archive stay editable. Deliberately exempt from the updated_* stamping rule. Execution STATE (running/completed/failed) still lives only in Temporal.']
   archived_at text [note: 'reversible domain flag (archive/unarchive), deliberately separate from the hygiene block; toggling it stamps updated_*']
   created_by text [not null]
   created_at text [not null]
@@ -230,15 +264,15 @@ Table workflow_runs {
   updated_at text
   deleted_at text [note: 'dormant (see Conventions)']
   indexes {
-    (engagement_id, created_at) [name: 'idx_workspaces']
+    (engagement_id, created_at) [name: 'idx_workflow_runs']
   }
-  Note: 'A workspace (named input set + results pinboard), NOT an execution record — executions live only in Temporal, and the per-run Summary is never written to the db. Also the run-mutex scope: the Temporal workflow id is wfrun-{instance}-{workflow_run_id}.'
+  Note: 'A workflow run: the business instance (named input set + results pinboard) — still NOT an execution record (execution state and the per-run Summary live only in Temporal; executed_at records only THAT a first dispatch happened). At most one business run per row: re-executing a COMPLETED run is refused (RUN_FROZEN — create a copy/revision instead), while a FAILED execution retries in place under the same Temporal id (wfrun-{instance}-{workflow_run_id}), so infra noise never mints business revisions.'
 }
 
 Table workflow_run_artifacts {
   workflow_run_id integer [not null, ref: > workflow_runs.workflow_run_id]
   artifact_id integer [not null, ref: > artifacts.artifact_id]
-  source attachment_source [not null, note: 'user = run input (part of the snapshot); engine = result pinned by a run. Workspace membership provenance — a separate concept from the derived artifact origin.']
+  source attachment_source [not null, note: 'user = run input (part of the snapshot); engine = result pinned by a run. Workflow-run membership provenance — a separate concept from the derived artifact origin.']
   created_by text [not null, note: 'who FIRST attached — served on the wire under the member-scoped aliases added_by/added_at (the joined row also carries the artifact\'s own created_*, so the names must differ there)']
   created_at text [not null, note: 'members list in first-attach order (MEMBERS_SQL)']
   updated_by text [note: 'the promoter — set only by a real engine→user promotion (guarded upsert); db-only, the wire signals promotion via source']
@@ -247,7 +281,7 @@ Table workflow_run_artifacts {
     (workflow_run_id, artifact_id) [pk]
     artifact_id [name: 'idx_impact']
   }
-  Note: 'Workspace membership. User attach PROMOTES an engine row to user (source flips, updated_* records the promoter, created_* — first attacher and time — survives, and the member keeps its list position); engine attach never demotes (ON CONFLICT DO NOTHING); a user→user re-attach is a true no-op (the promote upsert\'s WHERE source=engine guard). Detach (DELETE) removes membership, never the artifact — reintroducing the same bytes revives all prior work. No deleted_at: detach is the delete.'
+  Note: 'Workflow-run membership. User attach PROMOTES an engine row to user (source flips, updated_* records the promoter, created_* — first attacher and time — survives, and the member keeps its list position); engine attach never demotes (ON CONFLICT DO NOTHING); a user→user re-attach is a true no-op (the promote upsert\'s WHERE source=engine guard). User attach (fresh AND promotion) and detach reject RUN_FROZEN once the run is frozen; engine attach-back is exempt. Detach (DELETE) removes membership, never the artifact — reintroducing the same bytes revives all prior work. No deleted_at: detach is the delete.'
 }
 
 TableGroup catalog {
@@ -264,7 +298,7 @@ TableGroup ledger {
   node_run_inputs
 }
 
-TableGroup workspace {
+TableGroup workflow_run {
   workflow_runs
   workflow_run_artifacts
 }

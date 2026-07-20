@@ -4,10 +4,11 @@ import type {
   ArtifactOrigin,
   EngagementRow,
   EngagementStats,
+  LineageKind,
   NodeRunWithInputs,
-  WorkspaceListRow,
+  WorkflowRunListRow,
 } from '../infrastructure/db/Db.js';
-import { getArtifact, getWorkspace, stats } from '../infrastructure/db/Db.js';
+import { getArtifact, getWorkflowRun, stats } from '../infrastructure/db/Db.js';
 
 // Row→wire mappers. Wire keys stay snake_case per frontend-contract-spec, which is the contract —
 // with ONE documented exception: membership stamps are aliased (wra.created_by AS added_by,
@@ -54,12 +55,20 @@ export interface NodeRunOut {
   output: ArtifactMetaOut;
 }
 
-export interface WorkspaceDetailOut {
+// lineage_kind/executed_at are stored; root_workflow_run_id/lineage_byid/lineage_display are
+// DERIVED by the workflow_run_facts view (lineage_depth deliberately stays db-only). executed_at
+// non-null = frozen: attachments immutable, further work is a copy/revision/simulation.
+export interface WorkflowRunDetailOut {
   workflow_run_id: number;
   engagement_id: number;
   workflow_id: string;
   display_name: string;
   copied_from_workflow_run: number | null;
+  lineage_kind: LineageKind;
+  executed_at: string | null;
+  root_workflow_run_id: number;
+  lineage_byid: string;
+  lineage_display: string;
   archived_at: string | null;
   created_by: string;
   created_at: string;
@@ -68,13 +77,18 @@ export interface WorkspaceDetailOut {
   members: MemberOut[];
 }
 
-// The workspace list row: WorkspaceDetailOut minus members, plus the member counts.
-export interface WorkspaceListOut {
+// The workflow-run list row: WorkflowRunDetailOut minus members, plus the member counts.
+export interface WorkflowRunListOut {
   workflow_run_id: number;
   engagement_id: number;
   workflow_id: string;
   display_name: string;
   copied_from_workflow_run: number | null;
+  lineage_kind: LineageKind;
+  executed_at: string | null;
+  root_workflow_run_id: number;
+  lineage_byid: string;
+  lineage_display: string;
   archived_at: string | null;
   created_by: string;
   created_at: string;
@@ -146,20 +160,25 @@ const MEMBERS_SQL = `
   FROM workflow_run_artifacts wra JOIN artifact_facts a USING (artifact_id)
   WHERE wra.workflow_run_id=? ORDER BY wra.created_at, a.artifact_id`;
 
-export function workspaceDetail(conn: Database.Database, workflowRunId: number): WorkspaceDetailOut {
-  const ws = getWorkspace(conn, workflowRunId);
+export function workflowRunDetail(conn: Database.Database, workflowRunId: number): WorkflowRunDetailOut {
+  const run = getWorkflowRun(conn, workflowRunId);
   const members = conn.prepare<[number], MemberRow>(MEMBERS_SQL).all(workflowRunId);
   return {
-    workflow_run_id: ws.workflow_run_id,
-    engagement_id: ws.engagement_id,
-    workflow_id: ws.workflow_id,
-    display_name: ws.display_name,
-    copied_from_workflow_run: ws.copied_from_workflow_run,
-    archived_at: ws.archived_at,
-    created_by: ws.created_by,
-    created_at: ws.created_at,
-    updated_by: ws.updated_by,
-    updated_at: ws.updated_at,
+    workflow_run_id: run.workflow_run_id,
+    engagement_id: run.engagement_id,
+    workflow_id: run.workflow_id,
+    display_name: run.display_name,
+    copied_from_workflow_run: run.copied_from_workflow_run,
+    lineage_kind: run.lineage_kind,
+    executed_at: run.executed_at,
+    root_workflow_run_id: run.root_workflow_run_id,
+    lineage_byid: run.lineage_byid,
+    lineage_display: run.lineage_display,
+    archived_at: run.archived_at,
+    created_by: run.created_by,
+    created_at: run.created_at,
+    updated_by: run.updated_by,
+    updated_at: run.updated_at,
     members: members.map((m) => ({
       ...artifactMeta(m),
       source: m.source,
@@ -169,13 +188,18 @@ export function workspaceDetail(conn: Database.Database, workflowRunId: number):
   };
 }
 
-export function workspaceListOut(row: WorkspaceListRow): WorkspaceListOut {
+export function workflowRunListOut(row: WorkflowRunListRow): WorkflowRunListOut {
   return {
     workflow_run_id: row.workflow_run_id,
     engagement_id: row.engagement_id,
     workflow_id: row.workflow_id,
     display_name: row.display_name,
     copied_from_workflow_run: row.copied_from_workflow_run,
+    lineage_kind: row.lineage_kind,
+    executed_at: row.executed_at,
+    root_workflow_run_id: row.root_workflow_run_id,
+    lineage_byid: row.lineage_byid,
+    lineage_display: row.lineage_display,
     archived_at: row.archived_at,
     created_by: row.created_by,
     created_at: row.created_at,

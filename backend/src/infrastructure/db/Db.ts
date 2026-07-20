@@ -6,15 +6,20 @@ import { type Registry, validateCatalog } from '../../domain/registry/Registry.j
 import { isSqliteConstraintError, NotFoundError, RuntimeError, ValidationError } from '../../shared/errors/Errors.js';
 import { readPayload, writePayload } from '../storage/Storage.js';
 
-// SQLite ledger + workspace + catalog mirror.
+// SQLite ledger + workflow-run + catalog mirror.
 //   - ON CONFLICT DO NOTHING powers the idempotent completion transaction (convergence: identical
 //     bytes under one nodeparamslot land on one row);
 //   - artifact provenance is DERIVED, never stored: the artifact_facts view computes the producer
 //     (earliest node_run whose output_artifact_id points at the row) and the origin class from
-//     the nodeparamslot's authored source — nothing stored can diverge from lineage.
+//     the nodeparamslot's authored source — nothing stored can diverge from lineage. The same
+//     doctrine covers run lineage: workflow_run_facts derives family root and paths from
+//     copied_from_workflow_run + lineage_kind on every read; nothing stored can go stale.
 // LEDGER (artifacts, node_runs, node_run_inputs) is insert-only; the mutable ledger columns are
-// artifacts.display_name and its updated_by/updated_at stamps. WORKSPACE rows are editable; detaching a
-// workflow_run_artifacts row is the only user-facing DELETE (the publish transaction rewriting the
+// artifacts.display_name and its updated_by/updated_at stamps. WORKFLOW-RUN rows are editable
+// only until frozen: executed_at (write-once, stamped at first dispatch inside
+// freezeAndLoadDispatch) makes user attach/detach reject with RUN_FROZEN — engine attach-back
+// continues, display_name/archive stay editable. Detaching a workflow_run_artifacts row is the
+// only user-facing DELETE (the publish transaction rewriting the
 // workflow_nodeparamslots/node_input_nodeparamslots mirrors is the only other).
 //
 // Hygiene block conventions (tiered per table — schema.dbml carries the full rationale):
@@ -22,8 +27,11 @@ import { readPayload, writePayload } from '../storage/Storage.js';
 //     FIRST filer's values.
 //   - updated_by/updated_at nullable; NULL means never updated. Every UPDATE statement must stamp
 //     them. The idempotent write paths (promote upsert, publish upserts) are guarded so a no-op
-//     never stamps; the request-driven UPDATEs (rename, workspace PATCH/archive) stamp per
+//     never stamps; the request-driven UPDATEs (rename, workflow-run PATCH/archive) stamp per
 //     request — resubmitting an identical value re-stamps, matching archived_at's behavior.
+//     ONE deliberate exemption: the executed_at freeze stamp (freezeAndLoadDispatch) does NOT
+//     stamp updated_* — executed_at is itself the write-once audit stamp of the dispatch event
+//     (like created_at), and the dispatch path has no attributable actor.
 //   - deleted_at is dormant: always NULL, no reader filters on it — reserved for a future soft
 //     delete. workflow_runs.archived_at stays a separate, reversible domain flag.
 //   - actor columns hold principals '<type>[:<name>]' (domain/principal/Principal.ts), asserted at
@@ -132,6 +140,11 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   workflow_id TEXT NOT NULL REFERENCES workflows(workflow_id),
   display_name TEXT NOT NULL,
   copied_from_workflow_run INTEGER REFERENCES workflow_runs(workflow_run_id),
+  lineage_kind TEXT NOT NULL DEFAULT 'root'
+    CHECK (lineage_kind IN ('root','copy','revision','simulation'))
+    CHECK ((lineage_kind = 'root') = (copied_from_workflow_run IS NULL))
+    CHECK (copied_from_workflow_run <> workflow_run_id),
+  executed_at TEXT,
   archived_at TEXT,
   created_by TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -139,7 +152,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   updated_at TEXT,
   deleted_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_workspaces ON workflow_runs (engagement_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs ON workflow_runs (engagement_id, created_at);
 
 CREATE TABLE IF NOT EXISTS workflow_run_artifacts (
   workflow_run_id INTEGER NOT NULL REFERENCES workflow_runs(workflow_run_id),
@@ -169,6 +182,37 @@ SELECT
     ELSE k.source
   END AS origin
 FROM artifacts a JOIN nodeparamslots k ON k.nodeparamslot = a.nodeparamslot;
+
+-- READ MODEL: derived lineage, never stored. A FAMILY starts at a 'root' or 'copy' run and
+-- extends through 'revision'/'simulation' children (the boundary is the CHILD row's own
+-- lineage_kind: a 'copy' of a simulation starts a NEW family). root_workflow_run_id,
+-- lineage_depth, lineage_byid (family-root-to-self id path; the root's own is its bare id) and
+-- lineage_display (descendants: root display_name '/' own display_name; family-start rows show
+-- just their own name) are recomputed from copied_from_workflow_run on every read — renaming
+-- the family root flows through instantly. The CHECKs on workflow_runs
+-- (root ⇔ no parent; no self-parent) are what make this walk total and cycle-free: parents
+-- pre-exist their children and copied_from_workflow_run/lineage_kind have no UPDATE path, ever.
+-- Writers stay on base tables.
+CREATE VIEW IF NOT EXISTS workflow_run_facts AS
+WITH RECURSIVE lineage (workflow_run_id, root_workflow_run_id, root_display_name, lineage_depth, lineage_byid) AS (
+  SELECT wr.workflow_run_id, wr.workflow_run_id, wr.display_name, 0, CAST(wr.workflow_run_id AS TEXT)
+  FROM workflow_runs wr
+  WHERE wr.lineage_kind IN ('root','copy')
+  UNION ALL
+  SELECT wr.workflow_run_id, l.root_workflow_run_id, l.root_display_name, l.lineage_depth + 1,
+         l.lineage_byid || '/' || CAST(wr.workflow_run_id AS TEXT)
+  FROM workflow_runs wr
+  JOIN lineage l ON wr.copied_from_workflow_run = l.workflow_run_id
+  WHERE wr.lineage_kind IN ('revision','simulation')
+)
+SELECT
+  wr.*,
+  l.root_workflow_run_id,
+  l.lineage_depth,
+  l.lineage_byid,
+  CASE WHEN l.lineage_depth = 0 THEN wr.display_name
+       ELSE l.root_display_name || '/' || wr.display_name END AS lineage_display
+FROM workflow_runs wr JOIN lineage l USING (workflow_run_id);
 `;
 
 export interface EngagementRow {
@@ -208,12 +252,19 @@ export interface ArtifactFactsRow extends ArtifactRow {
   origin: ArtifactOrigin;
 }
 
+// What a creation-from-parent MEANS. 'root' = fresh (no parent — CHECK-coupled); 'copy' starts a
+// NEW family (may target a different workflow); 'revision'/'simulation' extend the parent's
+// family and must keep its workflow. There is no 'reissue': a no-change revision covers it.
+export type LineageKind = 'root' | 'copy' | 'revision' | 'simulation';
+
 export interface WorkflowRunRow {
   workflow_run_id: number;
   engagement_id: number;
   workflow_id: string;
   display_name: string;
   copied_from_workflow_run: number | null;
+  lineage_kind: LineageKind;
+  executed_at: string | null;
   archived_at: string | null;
   created_by: string;
   created_at: string;
@@ -222,7 +273,15 @@ export interface WorkflowRunRow {
   deleted_at: string | null;
 }
 
-export interface WorkspaceListRow extends WorkflowRunRow {
+// A row of the workflow_run_facts view: base columns plus derived lineage (never stored).
+export interface WorkflowRunFactsRow extends WorkflowRunRow {
+  root_workflow_run_id: number;
+  lineage_depth: number;
+  lineage_byid: string;
+  lineage_display: string;
+}
+
+export interface WorkflowRunListRow extends WorkflowRunFactsRow {
   user_docs: number;
   engine_results: number;
 }
@@ -247,7 +306,7 @@ export interface SuppliedArtifact extends ArtifactRef {
   existed: boolean;
 }
 
-export interface WorkspaceArtifact extends ArtifactRef {
+export interface WorkflowRunArtifact extends ArtifactRef {
   source: 'user' | 'engine';
   origin: ArtifactOrigin;
 }
@@ -275,7 +334,7 @@ export interface EngagementStats {
   artifacts: number;
   node_runs: number;
   human_answers: number;
-  workspaces: number;
+  workflow_runs: number;
 }
 
 export interface ArtifactLineage {
@@ -336,6 +395,9 @@ export function initDb(dbPath: string): string {
   try {
     conn.pragma('journal_mode = WAL');
     conn.exec(SCHEMA);
+    // Fail-loud probe: CREATE VIEW does not resolve columns; preparing a read against the view
+    // does. Booting new code against a pre-lineage db must die here, not on the first request.
+    conn.prepare('SELECT lineage_kind, executed_at FROM workflow_run_facts LIMIT 1').get();
     const row = conn.prepare<[], { value: string }>("SELECT value FROM meta WHERE key='instance_id'").get();
     if (row !== undefined) {
       return row.value;
@@ -397,8 +459,8 @@ const INPUTS_FOR_RUN_SQL = 'SELECT artifact_id FROM node_run_inputs WHERE node_r
 // ---------- catalog ----------
 
 // CI-publish the code registry into the catalog mirror. nodeparamslots/workflows/nodes are upsert-only
-// (retired rows persist — they are FK parents and what makes retired-workspace dispatch fail
-// loud); workflow_nodeparamslots and node_input_nodeparamslots are pure mirrors nothing FKs, rewritten
+// (retired rows persist — they are FK parents and what makes dispatching a run of a retired
+// workflow fail loud); workflow_nodeparamslots and node_input_nodeparamslots are pure mirrors nothing FKs, rewritten
 // delete-then-insert so declarations removed from code stop lingering between resets.
 // created_at is first-publish; updated_at stamps only a real change TO THE MIRRORED ROW'S OWN
 // COLUMNS (the DO UPDATE WHERE guards, IS NOT for NULL-safety) — a worker restart republishing an
@@ -555,25 +617,74 @@ export function supplyArtifact(
   }
 }
 
-// Create a workspace; copying takes USER-sourced membership rows only — engine results are never
-// copied (the new run recomputes or memo-hits them).
-export function createWorkspace(
+// What a create means, from what the caller sent: no copy_from ⇒ 'root'; copy_from without an
+// explicit kind ⇒ 'copy'. Explicit kinds are validated against the copy_from pairing here (pure,
+// shared by the route's fast-fail and createWorkflowRun's authoritative in-tx path).
+export function resolveLineageKind(copiedFrom: number | null, requested?: LineageKind): LineageKind {
+  if (requested === undefined) {
+    return copiedFrom === null ? 'root' : 'copy';
+  }
+  if (requested === 'root' && copiedFrom !== null) {
+    throw new ValidationError("lineage_kind 'root' cannot carry copy_from — use 'copy', 'revision' or 'simulation'");
+  }
+  if (requested !== 'root' && copiedFrom === null) {
+    throw new ValidationError(`lineage_kind '${requested}' requires copy_from`);
+  }
+  return requested;
+}
+
+// Create a workflow run. Copy is the ONLY creation-from-parent mechanism; lineage_kind records
+// what the copy means. Copying takes USER-sourced membership rows only — engine results are never
+// copied (the new run recomputes or memo-hits them). The db half of the copyability gate lives
+// here (parent exists, same engagement, executed at least once, revision/simulation keep the
+// parent's workflow); the Temporal half (parent execution terminal) is the route's describeRun
+// check — executed_at is set-once and terminality is monotonic, so this in-tx re-check can only
+// reject conservatively, never admit a stale parent.
+export function createWorkflowRun(
   conn: Database.Database,
   engagementId: number,
   workflowId: string,
   displayName: string,
-  opts: { createdBy?: string; copiedFrom?: number | null } = {}
+  opts: { createdBy?: string; copiedFrom?: number | null; lineageKind?: LineageKind } = {}
 ): number {
   const createdBy = opts.createdBy ?? 'user';
   assertPrincipal(createdBy);
   const copiedFrom = opts.copiedFrom ?? null;
+  const lineageKind = resolveLineageKind(copiedFrom, opts.lineageKind);
   conn.exec('BEGIN IMMEDIATE');
   try {
+    if (copiedFrom !== null) {
+      const parent = conn
+        .prepare<[number], { engagement_id: number; workflow_id: string; executed_at: string | null }>(
+          'SELECT engagement_id, workflow_id, executed_at FROM workflow_runs WHERE workflow_run_id=?'
+        )
+        .get(copiedFrom);
+      if (parent === undefined) {
+        throw new NotFoundError(`workflow_run ${copiedFrom} not found`, 'workflow_run', copiedFrom);
+      }
+      if (parent.engagement_id !== engagementId) {
+        throw new ValidationError('copy_from must be a workflow run in the same engagement');
+      }
+      if ((lineageKind === 'revision' || lineageKind === 'simulation') && workflowId !== parent.workflow_id) {
+        throw new ValidationError(
+          `a ${lineageKind} must keep the parent's workflow '${parent.workflow_id}' — asking for a different workflow is a copy`
+        );
+      }
+      if (parent.executed_at === null) {
+        throw new RuntimeError(
+          `workflow run ${copiedFrom} has never been executed — only finished runs can be copied`,
+          { code: 'RUN_NOT_COPYABLE' }
+        );
+      }
+    }
+    // One stamp for the run row AND its copied memberships — same one-tx-one-stamp convention as
+    // recordCompletion's filedAt.
+    const createdAt = nowIso();
     const info = conn
       .prepare(`
         INSERT INTO workflow_runs (engagement_id, workflow_id, display_name,
-        copied_from_workflow_run, created_by, created_at) VALUES (?,?,?,?,?,?)`)
-      .run(engagementId, workflowId, displayName, copiedFrom, createdBy, nowIso());
+        copied_from_workflow_run, lineage_kind, created_by, created_at) VALUES (?,?,?,?,?,?,?)`)
+      .run(engagementId, workflowId, displayName, copiedFrom, lineageKind, createdBy, createdAt);
     const wfr = Number(info.lastInsertRowid);
     if (copiedFrom !== null) {
       // Copied memberships are NEW memberships: fresh created_* under the copying actor.
@@ -582,7 +693,7 @@ export function createWorkspace(
           INSERT INTO workflow_run_artifacts (workflow_run_id, artifact_id, source, created_by, created_at)
           SELECT ?, artifact_id, 'user', ?, ? FROM workflow_run_artifacts
           WHERE workflow_run_id=? AND source='user'`)
-        .run(wfr, createdBy, nowIso(), copiedFrom);
+        .run(wfr, createdBy, createdAt, copiedFrom);
     }
     conn.exec('COMMIT');
     return wfr;
@@ -592,8 +703,32 @@ export function createWorkspace(
   }
 }
 
+// The one frozen-run rejection, shared by the Db-layer guards and the upload route's pre-check —
+// a single definition so the wire-visible literal cannot drift between the two sites.
+export const frozenRunError = (workflowRunId: number): RuntimeError =>
+  new RuntimeError(
+    `workflow run ${workflowRunId} is frozen (already executed) — attachments can no longer change; create a copy or revision`,
+    { code: 'RUN_FROZEN' }
+  );
+
+// The freeze guard, checked inside the caller's open BEGIN IMMEDIATE: a frozen run's
+// user-attachment set is immutable — the record of what ran never lies. Enforced here at the Db
+// layer (not the routes) so the CLI and seed cannot bypass it.
+function assertNotFrozen(conn: Database.Database, workflowRunId: number): void {
+  const row = conn
+    .prepare<[number], { executed_at: string | null }>('SELECT executed_at FROM workflow_runs WHERE workflow_run_id=?')
+    .get(workflowRunId);
+  if (row === undefined) {
+    throw new NotFoundError(`workflow_run ${workflowRunId} not found`, 'workflow_run', workflowRunId);
+  }
+  if (row.executed_at !== null) {
+    throw frozenRunError(workflowRunId);
+  }
+}
+
 // User attach PROMOTES an engine row to user (created_* preserved, updated_* stamped — see
-// ATTACH_PROMOTE_SQL); engine attach never demotes.
+// ATTACH_PROMOTE_SQL); engine attach never demotes. User attach (fresh AND promotion) rejects on
+// a frozen run; engine attach-back is exempt — executions keep pinning results to their own row.
 export function attach(
   conn: Database.Database,
   workflowRunId: number,
@@ -605,6 +740,9 @@ export function attach(
   assertPrincipal(createdBy);
   conn.exec('BEGIN IMMEDIATE');
   try {
+    if (source === 'user') {
+      assertNotFrozen(conn, workflowRunId);
+    }
     const sql = source === 'user' ? ATTACH_PROMOTE_SQL : ATTACH_ENGINE_SQL;
     conn.prepare(sql).run(workflowRunId, artifactId, source, createdBy, nowIso());
     conn.exec('COMMIT');
@@ -616,10 +754,12 @@ export function attach(
 
 // The user-facing delete — the only other DELETEs are the publish transaction rewriting the
 // workflow_nodeparamslots/node_input_nodeparamslots mirrors. The ledger keeps everything, which is why
-// reintroducing the same bytes revives prior work.
+// reintroducing the same bytes revives prior work. Rejects on a frozen run (the snapshot is
+// immutable); a missing membership row on an unfrozen run stays a no-op DELETE.
 export function detach(conn: Database.Database, workflowRunId: number, artifactId: number): void {
   conn.exec('BEGIN IMMEDIATE');
   try {
+    assertNotFrozen(conn, workflowRunId);
     conn
       .prepare('DELETE FROM workflow_run_artifacts WHERE workflow_run_id=? AND artifact_id=?')
       .run(workflowRunId, artifactId);
@@ -641,7 +781,70 @@ export function userAttachments(conn: Database.Database, workflowRunId: number):
   return rows.map(toRef);
 }
 
-export function workspaceArtifacts(conn: Database.Database, workflowRunId: number): WorkspaceArtifact[] {
+// Everything a dispatch needs, loaded and frozen in ONE dispatch payload.
+export interface WorkflowRunDispatch {
+  engagementId: number;
+  workflowId: string;
+  attachments: ArtifactRef[];
+  instance: string;
+  declaredNodeparamslots: string[];
+}
+
+// The freeze transaction: ONE BEGIN IMMEDIATE reads the run row, guards, stamps executed_at, and
+// snapshots the user attachments — so a membership change either commits before the freeze (and
+// is in the snapshot) or rejects RUN_FROZEN after it; a torn snapshot is impossible. Guard order
+// is load-bearing: every deterministic check (row exists, workflow published, snapshot
+// non-empty) runs BEFORE the stamp, so a doomed dispatch rolls back without freezing the row —
+// only network-fallible steps (describe, workflow.start) may follow the COMMIT. The stamp is
+// set-once (WHERE executed_at IS NULL) and never cleared, not even when the Temporal start later
+// fails: a frozen-but-idle row is recovered by re-executing (describe finds nothing → start),
+// never by unfreezing. Deliberately NO updated_* stamp — see the hygiene block above.
+export function freezeAndLoadDispatch(conn: Database.Database, workflowRunId: number): WorkflowRunDispatch {
+  conn.exec('BEGIN IMMEDIATE');
+  try {
+    const run = conn
+      .prepare<[number], WorkflowRunRow>('SELECT * FROM workflow_runs WHERE workflow_run_id=?')
+      .get(workflowRunId);
+    if (run === undefined) {
+      throw new NotFoundError(`workflow_run ${workflowRunId} not found`, 'workflow_run', workflowRunId);
+    }
+    // The catalog carries no dispatch metadata, but membership is still the guard: a run pointing
+    // at an unpublished workflow must fail here, not hang in Temporal.
+    const wfRow = conn
+      .prepare<[string], { workflow_id: string }>('SELECT workflow_id FROM workflows WHERE workflow_id=?')
+      .get(run.workflow_id);
+    if (wfRow === undefined) {
+      throw new RuntimeError(`workflow '${run.workflow_id}' is not in the catalog (run \`init\` first)`);
+    }
+    const attachments = userAttachments(conn, workflowRunId);
+    if (attachments.length === 0) {
+      throw new ValidationError('this workflow run has no documents attached — attach at least one before running');
+    }
+    const declaredNodeparamslots = conn
+      .prepare<[string], { nodeparamslot: string }>(
+        'SELECT nodeparamslot FROM workflow_nodeparamslots WHERE workflow_id=?'
+      )
+      .all(run.workflow_id)
+      .map((r) => r.nodeparamslot);
+    const instance = instanceId(conn);
+    conn
+      .prepare('UPDATE workflow_runs SET executed_at=? WHERE workflow_run_id=? AND executed_at IS NULL')
+      .run(nowIso(), workflowRunId);
+    conn.exec('COMMIT');
+    return {
+      engagementId: run.engagement_id,
+      workflowId: run.workflow_id,
+      attachments,
+      instance,
+      declaredNodeparamslots,
+    };
+  } catch (e) {
+    conn.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+export function workflowRunArtifacts(conn: Database.Database, workflowRunId: number): WorkflowRunArtifact[] {
   const rows = conn
     .prepare<[number], ArtifactFactsRow & { source: 'user' | 'engine' }>(`
       SELECT a.*, wra.source
@@ -651,9 +854,10 @@ export function workspaceArtifacts(conn: Database.Database, workflowRunId: numbe
   return rows.map((r) => ({ ...toRef(r), source: r.source, origin: r.origin }));
 }
 
-export function getWorkspace(conn: Database.Database, workflowRunId: number): WorkflowRunRow {
+// Read model (workflow_run_facts view) — write paths read the base table themselves.
+export function getWorkflowRun(conn: Database.Database, workflowRunId: number): WorkflowRunFactsRow {
   const row = conn
-    .prepare<[number], WorkflowRunRow>('SELECT * FROM workflow_runs WHERE workflow_run_id=?')
+    .prepare<[number], WorkflowRunFactsRow>('SELECT * FROM workflow_run_facts WHERE workflow_run_id=?')
     .get(workflowRunId);
   if (row === undefined) {
     throw new NotFoundError(`workflow_run ${workflowRunId} not found`, 'workflow_run', workflowRunId);
@@ -700,7 +904,7 @@ export function memoLookup(conn: Database.Database, engagementId: number, memoKe
 }
 
 // The completion transaction: ONE atomic, idempotent write filing output artifact + node_run +
-// input list + workspace attachment — every row it files shares one filedAt stamp.
+// input list + workflow-run attachment — every row it files shares one filedAt stamp.
 // fresh=false means the memo already had it.
 export function recordCompletion(
   conn: Database.Database,
@@ -830,7 +1034,7 @@ export function stats(conn: Database.Database, engagementId: number): Engagement
       SELECT COUNT(*) AS n FROM node_runs nr JOIN nodes n
       ON n.workflow_id=nr.workflow_id AND n.node_id=nr.node_id
       WHERE nr.engagement_id=? AND n.executor='human'`),
-    workspaces: count('SELECT COUNT(*) AS n FROM workflow_runs WHERE engagement_id=?'),
+    workflow_runs: count('SELECT COUNT(*) AS n FROM workflow_runs WHERE engagement_id=?'),
   };
 }
 
@@ -850,16 +1054,16 @@ export function getEngagement(conn: Database.Database, engagementId: number): En
   return row;
 }
 
-// Workspaces with user/engine member counts (idx_workspaces order).
-export function listWorkspaces(conn: Database.Database, engagementId: number): WorkspaceListRow[] {
+// Workflow runs with derived lineage and user/engine member counts (idx_workflow_runs order).
+export function listWorkflowRuns(conn: Database.Database, engagementId: number): WorkflowRunListRow[] {
   return conn
-    .prepare<[number], WorkspaceListRow>(`
+    .prepare<[number], WorkflowRunListRow>(`
       SELECT wr.*,
        (SELECT COUNT(*) FROM workflow_run_artifacts wra
          WHERE wra.workflow_run_id = wr.workflow_run_id AND wra.source='user') AS user_docs,
        (SELECT COUNT(*) FROM workflow_run_artifacts wra
          WHERE wra.workflow_run_id = wr.workflow_run_id AND wra.source='engine') AS engine_results
-      FROM workflow_runs wr WHERE wr.engagement_id=?
+      FROM workflow_run_facts wr WHERE wr.engagement_id=?
       ORDER BY wr.created_at, wr.workflow_run_id`)
     .all(engagementId);
 }

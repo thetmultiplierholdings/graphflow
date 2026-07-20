@@ -101,14 +101,16 @@ sample_docs/       mock "PDF" documents (.txt) the CLI seed/demo attaches
 ## Deviations from the monorepo standards (and why)
 
 1. **better-sqlite3 + hand-written SQL, not Drizzle/Postgres.** The ledger semantics
-   (`BEGIN IMMEDIATE`, the idempotent completion transaction, the derived `artifact_facts` view)
+   (`BEGIN IMMEDIATE`, the idempotent completion transaction, the derived
+   `artifact_facts`/`workflow_run_facts` views)
    *are* the product; SQLite is the deliberate v0 stand-in for Postgres.
    Migrating to Drizzle/Postgres is a post-move project. `src/infrastructure/db/Db.ts` stays
    concrete functions (no repository interface over 26 SQL functions); the narrow
    `TemporalGateway` interface in `src/api/` covers the seam where tests actually mock.
 2. **`src/shared/errors`** mirrors the `@multiplier/lib-shared-errors` API—swap the import
-   specifier on move. The stale-snapshot 409 is discriminated by `RuntimeError` with
-   `context.code === 'SNAPSHOT_CHANGED'` (no custom subclass).
+   specifier on move. State-conflict 409s are discriminated by `RuntimeError` with
+   `context.code` in `{RUN_FROZEN, RUN_NOT_COPYABLE}` (the `CONFLICT_CODES` set in
+   `src/api/App.ts`); every other `RuntimeError` maps to 422. No custom error subclasses.
 3. **`DecimalString` (BigInt-backed decimal-string arithmetic)** instead of
    `@multiplier/lib-shared-monetary`—payload money is decimal strings end to end (canonical
    JSON bans floats) and needs exact ROUND_HALF_UP quantization. The eventual `MonetaryAmount`
@@ -118,8 +120,8 @@ sample_docs/       mock "PDF" documents (.txt) the CLI seed/demo attaches
    `npm run check:workflows`.
 5. **Wire JSON is snake_case** (the frontend contract); internal identifiers are camelCase; the
    mapping lives in `src/api/Serializers.ts` and the transport types. One deliberate wire-key ≠
-   column-name exception: workspace members serve the membership's `created_by`/`created_at` as
-   `added_by`/`added_at` (aliased in `MEMBERS_SQL`) because the joined row also carries the
+   column-name exception: workflow-run members serve the membership's `created_by`/`created_at`
+   as `added_by`/`added_at` (aliased in `MEMBERS_SQL`) because the joined row also carries the
    artifact's own `created_*`.
 6. **No `application/` layer**—the API routes are the application services; adding a
    pass-through layer would violate the altitude rule.

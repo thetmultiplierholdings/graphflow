@@ -8,26 +8,26 @@ import {
   attach,
   connect,
   createEngagement,
-  createWorkspace,
+  createWorkflowRun,
   getEngagement,
   instanceId,
   readArtifactPayload,
   renameArtifact,
   stats,
   supplyArtifact,
-  workspaceArtifacts,
+  workflowRunArtifacts,
 } from '../infrastructure/db/Db.js';
 import type { Env } from '../infrastructure/env/Env.js';
 import { RuntimeError } from '../shared/errors/Errors.js';
 import type { Summary } from '../temporal/Context.js';
 import { HUMAN_TASK_WORKFLOW_TYPE, humanTaskIdPrefix, RUN_WORKFLOW_TYPE, runIdPrefix } from '../temporal/Ids.js';
 import type { WorkerHandle } from '../temporal/Runtime.js';
-import { connectClient, createWorker, startWorkspace } from '../temporal/Runtime.js';
+import { connectClient, createWorker, startWorkflowRun } from '../temporal/Runtime.js';
 import { Nodeparamslot as V1Nodeparamslot } from '../workflows/tax_demo_workflow/enums.js';
 import { Nodeparamslot as V2Nodeparamslot } from '../workflows/tax_demo_workflow_v2/enums.js';
 import type { AutoApprover } from './Inbox.js';
 import { listOpenHumanTasks, startAutoApprover } from './Inbox.js';
-import { buildCliRegistry, cmdInit, executeWorkspace, out, quotedList } from './Shared.js';
+import { buildCliRegistry, cmdInit, executeWorkflowRun, out, quotedList } from './Shared.js';
 
 const BROKERAGE = ['morgan_stanley.txt', 'goldman_sachs.txt', 'fidelity.txt'];
 const SLIPS = ['payslip_jan.txt', 'payslip_feb.txt', 'payslip_mar.txt'];
@@ -63,12 +63,12 @@ function printSummary(tag: string, summary: Summary): void {
 }
 
 function printReport(conn: Database.Database, storageRoot: string, workflowRunId: number, tag: string): void {
-  const reports = workspaceArtifacts(conn, workflowRunId).filter(
+  const reports = workflowRunArtifacts(conn, workflowRunId).filter(
     (a) => a.nodeparamslot === V1Nodeparamslot.FinalReport
   );
   const latest = reports.at(-1);
   if (latest === undefined) {
-    out(`  [${tag}] no final_report artifact in workspace`);
+    out(`  [${tag}] no final_report artifact in workflow run`);
     return;
   }
   const text = new TextDecoder().decode(readArtifactPayload(conn, storageRoot, latest.artifact_id));
@@ -113,41 +113,50 @@ export async function cmdDemo(env: Env): Promise<void> {
   try {
     const eng = createEngagement(conn, `acme-demo-${instance}`, { createdBy: 'user:demo-user' });
     out(`\n== SCENARIO 1: January from scratch (engagement ${eng}) ==`);
-    const jan = createWorkspace(conn, eng, 'tax_demo_workflow', 'January estimate', { createdBy: 'user:demo-user' });
+    const jan = createWorkflowRun(conn, eng, 'tax_demo_workflow', 'January estimate', {
+      createdBy: 'user:demo-user',
+    });
     for (const f of BROKERAGE) {
       supplyAndAttach(conn, env.storageRoot, eng, jan, f, V1Nodeparamslot.BrokerageStatement);
     }
     for (const f of SLIPS) {
       supplyAndAttach(conn, env.storageRoot, eng, jan, f, V1Nodeparamslot.PaymentSlip);
     }
-    const summary = await executeWorkspace(client, env.dbPath, jan, env.temporalTaskQueue);
+    const summary = await executeWorkflowRun(client, env.dbPath, jan, env.temporalTaskQueue);
     printSummary('January #1', summary);
     printReport(conn, env.storageRoot, jan, 'January');
 
-    out('\n== SCENARIO 2: run January AGAIN (everything memo-hits) ==');
-    const summary2 = await executeWorkspace(client, env.dbPath, jan, env.temporalTaskQueue);
-    printSummary('January #2', summary2);
+    // January is now frozen and completed — re-executing IT is refused (RUN_FROZEN). The way to
+    // run it again is a revision: a copy in the same family, here with zero changes.
+    out('\n== SCENARIO 2: a REVISION of January with no changes (everything memo-hits) ==');
+    const janRev = createWorkflowRun(conn, eng, 'tax_demo_workflow', 'January estimate — revision', {
+      createdBy: 'user:demo-user',
+      copiedFrom: jan,
+      lineageKind: 'revision',
+    });
+    const summary2 = await executeWorkflowRun(client, env.dbPath, janRev, env.temporalTaskQueue);
+    printSummary('January rev', summary2);
     if (summary2.executed.length !== 0) {
-      throw new RuntimeError('re-run must execute zero node bodies');
+      throw new RuntimeError('a no-change revision must execute zero node bodies');
     }
-    out('    -> zero node bodies executed, zero humans disturbed. The memo held.');
+    out('    -> zero node bodies executed, zero humans disturbed. The memo held across the family.');
 
     out('\n== SCENARIO 3: February = copy of January + 2 new documents ==');
-    const feb = createWorkspace(conn, eng, 'tax_demo_workflow', 'February estimate', {
+    const feb = createWorkflowRun(conn, eng, 'tax_demo_workflow', 'February estimate', {
       createdBy: 'user:demo-user',
       copiedFrom: jan,
     });
     for (const [f, nodeparamslot] of EXTRA) {
       supplyAndAttach(conn, env.storageRoot, eng, feb, f, nodeparamslot);
     }
-    const summary3 = await executeWorkspace(client, env.dbPath, feb, env.temporalTaskQueue);
+    const summary3 = await executeWorkflowRun(client, env.dbPath, feb, env.temporalTaskQueue);
     printSummary('February', summary3);
     printReport(conn, env.storageRoot, feb, 'February');
 
     const s = stats(conn, eng);
     out(
       `\n  [ledger] engagement ${eng}: ${s.node_runs} node_runs (${s.human_answers} human answers), ` +
-        `${s.artifacts} artifacts, ${s.workspaces} workspaces`
+        `${s.artifacts} artifacts, ${s.workflow_runs} workflow runs`
     );
     out('  [done] demo complete.');
   } finally {
@@ -240,7 +249,7 @@ function printSeedTotals(conn: Database.Database, engagementIds: readonly number
     const e = getEngagement(conn, engId);
     const s = stats(conn, engId);
     out(
-      `    ${e.display_name}: ${s.workspaces} workspaces, ${s.artifacts} artifacts, ` +
+      `    ${e.display_name}: ${s.workflow_runs} workflow runs, ${s.artifacts} artifacts, ` +
         `${s.node_runs} node_runs (${s.human_answers} human answers)`
     );
   }
@@ -273,32 +282,33 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
       // -- Acme: January executed to completion (Priya approves the six verifies)
       const acme = createEngagement(conn, 'Acme Ltd — UK Tax FY 2025/26', { createdBy: 'user:thet' });
       out(`\n  [seed] engagement ${acme}: Acme Ltd — UK Tax FY 2025/26`);
-      const jan = createWorkspace(conn, acme, 'tax_demo_workflow', 'January estimate', { createdBy: 'user:thet' });
+      const jan = createWorkflowRun(conn, acme, 'tax_demo_workflow', 'January estimate', { createdBy: 'user:thet' });
       for (const f of BROKERAGE) {
         supplyAndAttach(conn, env.storageRoot, acme, jan, f, V1Nodeparamslot.BrokerageStatement);
       }
       for (const f of SLIPS) {
         supplyAndAttach(conn, env.storageRoot, acme, jan, f, V1Nodeparamslot.PaymentSlip);
       }
-      const summary = await executeWorkspace(client, env.dbPath, jan, env.temporalTaskQueue);
+      const summary = await executeWorkflowRun(client, env.dbPath, jan, env.temporalTaskQueue);
       printSummary('seed/January', summary);
 
-      const reports = workspaceArtifacts(conn, jan).filter((a) => a.nodeparamslot === V1Nodeparamslot.FinalReport);
+      const reports = workflowRunArtifacts(conn, jan).filter((a) => a.nodeparamslot === V1Nodeparamslot.FinalReport);
       const lastReport = reports.at(-1);
       if (lastReport !== undefined) {
         renameArtifact(conn, lastReport.artifact_id, 'January estimate — sent to client', 'user:thet');
         out("  [seed] renamed final report -> 'January estimate — sent to client'");
       }
 
-      // -- Acme: February = copy of January + 2 extra docs, NOT executed
-      const feb = createWorkspace(conn, acme, 'tax_demo_workflow', 'February estimate', {
+      // -- Acme: February = copy of January + 2 extra docs, NOT executed (January completed
+      // above, so the copyability gate passes)
+      const feb = createWorkflowRun(conn, acme, 'tax_demo_workflow', 'February estimate', {
         createdBy: 'user:thet',
         copiedFrom: jan,
       });
       for (const [f, nodeparamslot] of EXTRA) {
         supplyAndAttach(conn, env.storageRoot, acme, feb, f, nodeparamslot);
       }
-      out(`  [seed] workspace ${feb} 'February estimate' staged (not executed)`);
+      out(`  [seed] workflow run ${feb} 'February estimate' staged (not executed)`);
 
       // Auto-approver OFF from here: Blue Harbour's verify tasks must stay open.
       await approver.stop();
@@ -307,7 +317,7 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
       // -- Blue Harbour: run started, left waiting on its 2 verify tasks
       const bh = createEngagement(conn, 'Blue Harbour LLP — UK Tax FY 2025/26', { createdBy: 'user:thet' });
       out(`\n  [seed] engagement ${bh}: Blue Harbour LLP — UK Tax FY 2025/26`);
-      const q1 = createWorkspace(conn, bh, 'tax_demo_workflow_v2', 'Q1 estimate', { createdBy: 'user:thet' });
+      const q1 = createWorkflowRun(conn, bh, 'tax_demo_workflow_v2', 'Q1 estimate', { createdBy: 'user:thet' });
       supplyAndAttach(conn, env.storageRoot, bh, q1, 'bh_schwab.txt', V2Nodeparamslot.BrokerageStatement);
       supplyAndAttach(conn, env.storageRoot, bh, q1, 'bh_payslip_feb.txt', V2Nodeparamslot.PaymentSlip);
       // The questionnaire channel: answers are canonical JSON so a re-answered identical form
@@ -325,7 +335,7 @@ export async function cmdSeed(env: Env, fresh: boolean): Promise<void> {
       out(
         `  [upload] residency questionnaire -> ${V2Nodeparamslot.ResidencyAnswers} artifact#${residency.artifact_id}`
       );
-      const handle = await startWorkspace(client, env.dbPath, q1, env.temporalTaskQueue, false);
+      const handle = await startWorkflowRun(client, env.dbPath, q1, env.temporalTaskQueue);
       out(`  [seed] started ${handle.workflowId} — leaving it waiting on human review`);
 
       const openTaskIds = await waitForOpenVerifyTasks(client, env, instance, bh);

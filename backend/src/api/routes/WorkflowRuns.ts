@@ -5,16 +5,17 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import {
   attach,
-  createWorkspace,
+  createWorkflowRun,
   detach,
   getArtifact,
   getEngagement,
-  getWorkspace,
-  listWorkspaces,
+  getWorkflowRun,
+  listWorkflowRuns,
   nowIso,
+  resolveLineageKind,
   userAttachments,
 } from '../../infrastructure/db/Db.js';
-import { ValidationError } from '../../shared/errors/Errors.js';
+import { RuntimeError, ValidationError } from '../../shared/errors/Errors.js';
 import { runWorkflowId } from '../../temporal/Ids.js';
 import type { ApiDeps, ProgressSnapshot } from '../Deps.js';
 import { withConn } from '../Deps.js';
@@ -24,14 +25,12 @@ import {
   AttachBodySchema,
   AttachmentParamsSchema,
   EngagementIdParamsSchema,
-  ExecuteQuerySchema,
-  isSupersede,
+  WorkflowRunCreateSchema,
   WorkflowRunIdParamsSchema,
-  WorkspaceCreateSchema,
-  WorkspacePatchSchema,
+  WorkflowRunPatchSchema,
 } from '../Schemas.js';
-import type { WorkspaceDetailOut, WorkspaceListOut } from '../Serializers.js';
-import { workspaceDetail, workspaceListOut } from '../Serializers.js';
+import type { WorkflowRunDetailOut, WorkflowRunListOut } from '../Serializers.js';
+import { workflowRunDetail, workflowRunListOut } from '../Serializers.js';
 
 const workflowInCatalog = (conn: Database.Database, workflowId: string): boolean =>
   conn.prepare<[string], { '1': number }>('SELECT 1 FROM workflows WHERE workflow_id=?').get(workflowId) !== undefined;
@@ -108,37 +107,73 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
   r.get(
     '/engagements/:engagement_id/workflow-runs',
     { schema: { params: EngagementIdParamsSchema } },
-    async (request): Promise<WorkspaceListOut[]> => {
+    async (request): Promise<WorkflowRunListOut[]> => {
       return withConn(deps, (conn) => {
         getEngagement(conn, request.params.engagement_id);
-        return listWorkspaces(conn, request.params.engagement_id).map(workspaceListOut);
+        return listWorkflowRuns(conn, request.params.engagement_id).map(workflowRunListOut);
       });
     }
   );
 
   r.post(
     '/engagements/:engagement_id/workflow-runs',
-    { schema: { params: EngagementIdParamsSchema, body: WorkspaceCreateSchema } },
-    async (request): Promise<WorkspaceDetailOut> => {
+    { schema: { params: EngagementIdParamsSchema, body: WorkflowRunCreateSchema } },
+    async (request): Promise<WorkflowRunDetailOut> => {
       const engagementId = request.params.engagement_id;
       const body = request.body;
-      return withConn(deps, (conn) => {
+      const copyFrom = body.copy_from ?? null;
+      const lineageKind = resolveLineageKind(copyFrom, body.lineage_kind);
+      // Phase A — deterministic guards, fast-fail (createWorkflowRun re-checks every one inside
+      // its own transaction; executed_at is set-once, so the re-check can only reject harder).
+      withConn(deps, (conn) => {
         getEngagement(conn, engagementId);
         if (!workflowInCatalog(conn, body.workflow_id)) {
           throw new ValidationError(`workflow '${body.workflow_id}' is not in the catalog`);
         }
-        const copyFrom = body.copy_from ?? null;
         if (copyFrom !== null) {
-          const src = getWorkspace(conn, copyFrom);
-          if (src.engagement_id !== engagementId) {
-            throw new ValidationError('copy_from must be a workspace in the same engagement');
+          const parent = getWorkflowRun(conn, copyFrom);
+          if (parent.engagement_id !== engagementId) {
+            throw new ValidationError('copy_from must be a workflow run in the same engagement');
+          }
+          if ((lineageKind === 'revision' || lineageKind === 'simulation') && body.workflow_id !== parent.workflow_id) {
+            throw new ValidationError(
+              `a ${lineageKind} must keep the parent's workflow '${parent.workflow_id}' — asking for a different workflow is a copy`
+            );
+          }
+          if (parent.executed_at === null) {
+            throw new RuntimeError(
+              `workflow run ${copyFrom} has never been executed — only finished runs can be copied`,
+              { code: 'RUN_NOT_COPYABLE' }
+            );
           }
         }
-        const wfr = createWorkspace(conn, engagementId, body.workflow_id, body.display_name, {
+      });
+      // The Temporal half of the copyability gate — between the conn scopes, never inside one
+      // (withConn is synchronous). Terminality is monotonic, so the describe-then-create TOCTOU
+      // only ever rejects conservatively. Completed AND failed both count as terminal:
+      // fix-forward from a failed run is deliberate.
+      if (copyFrom !== null) {
+        const state = await deps.temporal.describeRun(workflowIdFor(copyFrom));
+        if (state === 'running') {
+          throw new RuntimeError(`workflow run ${copyFrom} is still running — wait for it to finish before copying`, {
+            code: 'RUN_NOT_COPYABLE',
+          });
+        }
+        if (state === null) {
+          // Frozen-but-idle: the parent froze but its dispatch never reached Temporal.
+          throw new RuntimeError(`workflow run ${copyFrom} has not finished executing — wait for it before copying`, {
+            code: 'RUN_NOT_COPYABLE',
+          });
+        }
+      }
+      // Phase B — the authoritative create.
+      return withConn(deps, (conn) => {
+        const wfr = createWorkflowRun(conn, engagementId, body.workflow_id, body.display_name, {
           createdBy: 'user',
           copiedFrom: copyFrom,
+          lineageKind,
         });
-        return workspaceDetail(conn, wfr);
+        return workflowRunDetail(conn, wfr);
       });
     }
   );
@@ -146,41 +181,37 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
   r.get(
     '/workflow-runs/:workflow_run_id',
     { schema: { params: WorkflowRunIdParamsSchema } },
-    async (request): Promise<WorkspaceDetailOut> => {
-      return withConn(deps, (conn) => workspaceDetail(conn, request.params.workflow_run_id));
+    async (request): Promise<WorkflowRunDetailOut> => {
+      return withConn(deps, (conn) => workflowRunDetail(conn, request.params.workflow_run_id));
     }
   );
 
   r.patch(
     '/workflow-runs/:workflow_run_id',
-    { schema: { params: WorkflowRunIdParamsSchema, body: WorkspacePatchSchema } },
-    async (request): Promise<WorkspaceDetailOut> => {
+    { schema: { params: WorkflowRunIdParamsSchema, body: WorkflowRunPatchSchema } },
+    async (request): Promise<WorkflowRunDetailOut> => {
       const workflowRunId = request.params.workflow_run_id;
       const body = request.body;
       return withConn(deps, (conn) => {
-        getWorkspace(conn, workflowRunId);
+        getWorkflowRun(conn, workflowRunId);
         const displayName = body.display_name ?? null;
-        const workflowId = body.workflow_id ?? null;
-        if (workflowId !== null && !workflowInCatalog(conn, workflowId)) {
-          throw new ValidationError(`workflow '${workflowId}' is not in the catalog`);
-        }
         // PATCH {} changes nothing — skip the UPDATE so updated_* records only real changes.
-        if (displayName === null && workflowId === null) {
-          return workspaceDetail(conn, workflowRunId);
+        // (workflow_id left PATCH entirely: a different DAG is a root-class copy, never a
+        // re-point; display_name stays editable on frozen runs — lineage_display derives live.)
+        if (displayName === null) {
+          return workflowRunDetail(conn, workflowRunId);
         }
         conn.exec('BEGIN IMMEDIATE');
         try {
           conn
-            .prepare(
-              'UPDATE workflow_runs SET display_name=COALESCE(?, display_name), workflow_id=COALESCE(?, workflow_id), updated_by=?, updated_at=? WHERE workflow_run_id=?'
-            )
-            .run(displayName, workflowId, 'user', nowIso(), workflowRunId);
+            .prepare('UPDATE workflow_runs SET display_name=?, updated_by=?, updated_at=? WHERE workflow_run_id=?')
+            .run(displayName, 'user', nowIso(), workflowRunId);
           conn.exec('COMMIT');
         } catch (e) {
           conn.exec('ROLLBACK');
           throw e;
         }
-        return workspaceDetail(conn, workflowRunId);
+        return workflowRunDetail(conn, workflowRunId);
       });
     }
   );
@@ -188,14 +219,15 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
   r.post(
     '/workflow-runs/:workflow_run_id/archive',
     { schema: { params: WorkflowRunIdParamsSchema, body: ArchiveBodySchema } },
-    async (request): Promise<WorkspaceDetailOut> => {
+    async (request): Promise<WorkflowRunDetailOut> => {
       const workflowRunId = request.params.workflow_run_id;
       return withConn(deps, (conn) => {
-        getWorkspace(conn, workflowRunId);
+        getWorkflowRun(conn, workflowRunId);
         conn.exec('BEGIN IMMEDIATE');
         try {
           // Archive and unarchive are both stamped updates; re-POSTing the same state re-stamps
-          // (matches the pre-existing archived_at re-stamp behavior).
+          // (matches the pre-existing archived_at re-stamp behavior). Archiving a frozen run is
+          // legal — archive is display metadata, not membership.
           const at = nowIso();
           conn
             .prepare('UPDATE workflow_runs SET archived_at=?, updated_by=?, updated_at=? WHERE workflow_run_id=?')
@@ -205,7 +237,7 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
           conn.exec('ROLLBACK');
           throw e;
         }
-        return workspaceDetail(conn, workflowRunId);
+        return workflowRunDetail(conn, workflowRunId);
       });
     }
   );
@@ -215,12 +247,13 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
     { schema: { params: WorkflowRunIdParamsSchema, body: AttachBodySchema } },
     async (request, reply): Promise<FastifyReply> => {
       withConn(deps, (conn) => {
-        const ws = getWorkspace(conn, request.params.workflow_run_id);
+        const run = getWorkflowRun(conn, request.params.workflow_run_id);
         const art = getArtifact(conn, request.body.artifact_id);
-        if (art.engagement_id !== ws.engagement_id) {
+        if (art.engagement_id !== run.engagement_id) {
           throw new ValidationError('artifact belongs to a different engagement');
         }
-        attach(conn, ws.workflow_run_id, art.artifact_id, { source: 'user', createdBy: 'user' });
+        // A frozen run rejects inside attach (RUN_FROZEN → 409).
+        attach(conn, run.workflow_run_id, art.artifact_id, { source: 'user', createdBy: 'user' });
       });
       return reply.code(204).send();
     }
@@ -231,8 +264,9 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
     { schema: { params: AttachmentParamsSchema } },
     async (request, reply): Promise<FastifyReply> => {
       withConn(deps, (conn) => {
-        getWorkspace(conn, request.params.workflow_run_id);
-        // A missing artifact/membership row is NOT an error — the DELETE is a no-op.
+        getWorkflowRun(conn, request.params.workflow_run_id);
+        // A missing artifact/membership row is NOT an error — the DELETE is a no-op. A frozen
+        // run rejects inside detach (RUN_FROZEN → 409).
         detach(conn, request.params.workflow_run_id, request.params.artifact_id);
       });
       return reply.code(204).send();
@@ -241,19 +275,18 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
 
   r.post(
     '/workflow-runs/:workflow_run_id/execute',
-    { schema: { params: WorkflowRunIdParamsSchema, querystring: ExecuteQuerySchema } },
+    { schema: { params: WorkflowRunIdParamsSchema } },
     async (request, reply): Promise<FastifyReply> => {
       const workflowRunId = request.params.workflow_run_id;
+      // Fast path only — the authoritative guards (row exists, catalog membership, non-empty
+      // snapshot) re-run inside freezeAndLoadDispatch's transaction before the freeze stamp.
       withConn(deps, (conn) => {
-        getWorkspace(conn, workflowRunId);
+        getWorkflowRun(conn, workflowRunId);
         if (userAttachments(conn, workflowRunId).length === 0) {
-          throw new ValidationError('this workspace has no documents attached — attach at least one before running');
+          throw new ValidationError('this workflow run has no documents attached — attach at least one before running');
         }
       });
-      const temporalWorkflowId = await deps.temporal.startWorkspace(
-        workflowRunId,
-        isSupersede(request.query.supersede)
-      );
+      const temporalWorkflowId = await deps.temporal.startWorkflowRun(workflowRunId);
       const body: ExecuteOut = { temporal_workflow_id: temporalWorkflowId };
       return reply.code(202).send(body);
     }
@@ -264,7 +297,7 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
     { schema: { params: WorkflowRunIdParamsSchema } },
     async (request): Promise<StatusOut> => {
       const workflowRunId = request.params.workflow_run_id;
-      withConn(deps, (conn) => getWorkspace(conn, workflowRunId));
+      withConn(deps, (conn) => getWorkflowRun(conn, workflowRunId));
       const temporalWorkflowId = workflowIdFor(workflowRunId);
       const status = await deps.temporal.describeRun(temporalWorkflowId);
       if (status === null) {
@@ -283,7 +316,7 @@ export function registerWorkflowRunRoutes(app: FastifyInstance, deps: ApiDeps): 
     { schema: { params: WorkflowRunIdParamsSchema } },
     async (request, reply): Promise<void> => {
       const workflowRunId = request.params.workflow_run_id;
-      withConn(deps, (conn) => getWorkspace(conn, workflowRunId));
+      withConn(deps, (conn) => getWorkflowRun(conn, workflowRunId));
 
       reply.hijack();
       const headers: OutgoingHttpHeaders = {};

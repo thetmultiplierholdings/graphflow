@@ -38,6 +38,11 @@ const locPrefix = (context: string | undefined): string => {
 
 const INDEX_SEGMENT_RE = /^\d+$/;
 
+// RuntimeError context.codes that mean "state conflict" (409): RUN_FROZEN — the run already
+// executed (attachments immutable / completed runs never re-execute); RUN_NOT_COPYABLE — the
+// copy_from parent has no terminal execution yet. Every other RuntimeError stays a 422.
+const CONFLICT_CODES = new Set(['RUN_FROZEN', 'RUN_NOT_COPYABLE']);
+
 const pathSegments = (instancePath: string): (string | number)[] =>
   instancePath
     .split('/')
@@ -84,7 +89,7 @@ export async function buildApp(deps: ApiDeps, opts: BuildAppOptions = {}): Promi
       return reply.code(404).send({ detail: err.message });
     }
     if (err instanceof RuntimeError) {
-      const code = err.context?.code === 'SNAPSHOT_CHANGED' ? 409 : 422;
+      const code = typeof err.context?.code === 'string' && CONFLICT_CODES.has(err.context.code) ? 409 : 422;
       return reply.code(code).send({ detail: err.message });
     }
     if (hasZodFastifySchemaValidationErrors(error)) {

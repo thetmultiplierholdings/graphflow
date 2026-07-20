@@ -775,3 +775,41 @@ payload store while keeping the db (or vice versa) — reset both together with 
 Backend `node_modules/` is machine-specific (better-sqlite3 native build): if imports fail after
 switching machines, delete it and `npm install`. Monorepo-migration notes and deliberate
 deviations from the monorepo standards live in `backend/README.md`.
+
+## Demo scenario tests (the e2e proxy)
+
+The black-box acceptance layer without the frontend: `backend/demo_tests/` holds scenario pairs
+— `scenarioN_input.md` is a story a human reads (prose explaining what should happen, plus
+fenced ` ```steps ` blocks the runner executes), and `scenarioN_output.md` is the db-derived
+truth (generated, never hand-edited) that the suite compares byte-for-byte. The runner
+(`DemoScenario.ts` + `DemoScenario.test.ts` in backend/src/demo/) makes the same moves `cli
+demo` makes — create, upload, copy, execute with the embedded worker and the auto-approver
+answering `verify_txns` — under the test's own isolation (scratch db and store, real Temporal
+on a unique per-scenario task queue, a fresh instance prefix), then reads the scratch db
+DIRECTLY (`listWorkflowRuns`, `stats`, `workflowRunArtifacts`, payload reads) and renders
+executions, the lineage table, engagement stats, rejected commands (with their exact messages
+and 409 codes), and requested final reports into deterministic markdown. It drives the Db/
+Runtime layer, not HTTP — route-owned behavior (the describeRun copyability gate on
+running/idle parents, upload-with-attach's frozen-check-before-filing) is pinned by
+ApiCrud.test.ts and ApiIntegration.test.ts, not here.
+
+The step grammar (one line per step; `fail ` prefix means the command must be refused by the
+PRODUCT — harness errors rethrow, so a typo cannot mint a golden): `engagement`,
+`run … = create`, `run … = copy <parent> <copy|revision|simulation|root>` (`root` is legal only
+so a `fail` step can demonstrate the pairing refusal), `upload`, `answers` (the questionnaire
+channel), `detach`, `execute`, `report` — documented at the top of `DemoScenario.ts`. The five
+shipped scenarios: January from scratch (root + freeze), the no-change revision (pure memo
+replay across a family), the February period copy (marginal recompute only), the guardrails
+(the RUN_FROZEN / RUN_NOT_COPYABLE / pairing refusals reachable from the Db layer, each with
+its exact message), and simulations (three residencies, one family — including the convergence
+finding that byte-identical reports from distinct questions file as ONE artifact).
+
+The suite is part of `npm run test` (so `npm run check` runs it after every change) and
+auto-skips without `TEMPORAL_API_KEY`, like ApiIntegration.test.ts. After an INTENTIONAL
+behavior change, regenerate with `GRAPHFLOW_UPDATE_DEMOS=1 npm run test --
+src/demo/DemoScenario.test.ts`, then read the output diff like a code change — drift shows up
+as legible markdown, not a stack trace. Determinism contract (why byte-compare works): a fresh
+SQLite db assigns the same ids for the same step sequence, artifact hashes are content hashes
+of fixed sample docs, the renderer emits no timestamps and no Temporal ids, and `Summary` node
+lists are rendered sorted (the live order is activity-completion order, which varies for the
+workflows' `Promise.all` chains).

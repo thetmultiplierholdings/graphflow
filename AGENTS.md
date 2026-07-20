@@ -1,5 +1,26 @@
 # AGENTS.md
 
+## The README contract (read this first, literally)
+
+The root README.md is the technical design document and the single map of this codebase. It
+exists so the next agent (or human) starts oriented instead of burning a session rediscovering
+the system — or worse, walking a confident wrong path. Two obligations follow:
+
+1. **Always read the root README.md before you begin any work in this repo.** Not a skim of the
+   first paragraph — the domain model, the invariants, and whichever sections touch the area you
+   are about to change. Work that contradicts the README because it went unread is a process
+   failure, not a style nit.
+2. **At the end of any change, ask the user whether the README needs updating — every time, and
+   ask to what degree of fury.** "Degree of fury" is the intended scale: from a one-line touch-up
+   of a stale sentence, through rewriting the affected sections, up to a full adversarially
+   reviewed overhaul. Do not decide unilaterally in either direction: silently skipping the
+   update strands the next agent with a lying map, and silently rewriting everything churns a
+   document other people anchor to. Ask, then do exactly what was chosen.
+
+A stale or wrong README is worse than none: the next agent trusts it, plans against it, and
+digs rabbit holes exactly where it lies. Treat README accuracy as part of the definition of
+done, alongside `npm run check`.
+
 ## Answering questions about this codebase (Q&A, planning, discussion)
 
 **Scope:** These rules govern prose that explains, discusses, or plans around this codebase — including explanations given inside an implementation turn. They do not govern code, code comments, or commit messages; implementation work itself follows the default harness behavior.

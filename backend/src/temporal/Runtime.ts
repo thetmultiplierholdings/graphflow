@@ -141,9 +141,10 @@ export function rethrowStartError(e: Error, workflowRunId: number): never {
 // idempotently (USE_EXISTING — double-click safety); COMPLETED refuses with RUN_FROZEN (a
 // business run happens at most once — copy/revise instead); any other closed state (or none)
 // re-dispatches under the SAME id — the retry-in-place path, so infra noise never mints a
-// business revision. Benign race, accepted: describe says RUNNING, the run completes before
-// start — the fresh execution memo-replays to completion with zero executed node bodies
-// (frozen snapshot ⇒ identical memo keys).
+// business revision. The describe is advisory: if the run completes in the describe/start gap,
+// the reuse policy refuses the start server-side and rethrowStartError maps the refusal to the
+// same RUN_FROZEN the fast path would have thrown — the caller gets a 409 either way
+// (Runtime.test.ts pins this).
 export async function startWorkflowRun(
   client: Client,
   dbPath: string,

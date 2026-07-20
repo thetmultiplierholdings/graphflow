@@ -16,10 +16,21 @@ the system — or worse, walking a confident wrong path. Two obligations follow:
    reviewed overhaul. Do not decide unilaterally in either direction: silently skipping the
    update strands the next agent with a lying map, and silently rewriting everything churns a
    document other people anchor to. Ask, then do exactly what was chosen.
+3. **README.md and schema.dbml are one unit — read them together, revise them in the same
+   pass.** schema.dbml is the hand-kept transcription of the `SCHEMA` constant in
+   backend/src/infrastructure/db/Db.ts, and the README's domain model leans on it by name; the
+   two documents cite each other's facts (tables, columns, views, the notes explaining why).
+   Reading the README for orientation means reading schema.dbml for whatever tables your work
+   touches. Any README revision pass includes a schema.dbml tally in the same go — and the
+   reverse is the hard rule the README states as a standing invariant: a schema edit ships its
+   schema.dbml transcription (and any README sections it falsifies) in the SAME change, never
+   as a follow-up. When you ask the degree-of-fury question from rule 2, the question covers
+   both files at once.
 
 A stale or wrong README is worse than none: the next agent trusts it, plans against it, and
-digs rabbit holes exactly where it lies. Treat README accuracy as part of the definition of
-done, alongside `npm run check`.
+digs rabbit holes exactly where it lies — and a schema.dbml that disagrees with either the
+README or the `SCHEMA` constant is the same trap wearing a different file name. Treat their
+accuracy as part of the definition of done, alongside `npm run check`.
 
 ## Answering questions about this codebase (Q&A, planning, discussion)
 

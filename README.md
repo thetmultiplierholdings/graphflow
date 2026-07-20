@@ -38,8 +38,8 @@ API. The drift, oldest first:
   `lineage_display`, PATCH lost `workflow_id`, execute lost `?supersede`, and 409 now means
   `RUN_FROZEN` or `RUN_NOT_COPYABLE` (SNAPSHOT_CHANGED is gone).
 
-The frontend still speaks the old vocabulary. Porting it, and all e2e work, is deliberately
-deferred.
+The frontend still speaks the old vocabulary. Porting it, and browser e2e work, is deliberately
+deferred; the demo scenario tests (the last section of this README) are the e2e proxy meanwhile.
 
 ## Vocabulary and the domain model
 
@@ -463,6 +463,9 @@ backend/                    the product (Node 22+, npm — not yarn)
                               HumanTasks
   src/cli/                  init / worker / demo / seed / tasks / submit / show / download
                             (Inbox.ts holds the demo auto-approver, hardwired to verify_txns)
+  src/demo/                 DemoScenario.ts (the steps grammar + runner + markdown renderer) +
+                            DemoScenario.test.ts, the golden-file scenario suite (see "Demo
+                            scenario tests" at the end)
   src/shared/errors/        Errors.ts — the whole error taxonomy: ValidationError, NotFoundError,
                             RuntimeError, isSqliteConstraintError (local mirror of
                             @multiplier/lib-shared-errors; do not add other error classes)
@@ -470,6 +473,8 @@ backend/                    the product (Node 22+, npm — not yarn)
                             monorepo move (exports buildApp, bootstrap, ApiDeps, TemporalGateway)
   scripts/check-workflows.ts  layout discipline (see below); cleanup-temporal.ts (e2e teardown)
   sample_docs/              mock "PDF" documents (.txt) used by seed/demo/tests
+  demo_tests/               scenarioN_input.md stories + their generated scenarioN_output.md
+                            goldens — the demo-scenario pairs (inputs name sample_docs/ files)
 frontend/                   Next.js UI — currently behind the wire contract, port deferred
 schema.dbml                 the schema, transcribed from SCHEMA in Db.ts (kept in sync by hand)
 ```
@@ -661,7 +666,7 @@ internal identifiers are camelCase. The shapes a frontend consumes:
 
 `npm run check` = typecheck + tests + lint (biome, warnings fatal) + `check:workflows`. One
 suite alone: `npm run test -- src/infrastructure/db/Db.test.ts` (plus `test:watch`,
-`test:coverage`). Twelve suites (vitest, all colocated):
+`test:coverage`). Thirteen suites (vitest, all colocated):
 
 - `Canonical.test.ts`, `DecimalString.test.ts`, `Env.test.ts`, `Storage.test.ts`,
   `Principal.test.ts` — pure units (`Principal.test.ts` pins the principal grammar itself).
@@ -672,9 +677,10 @@ suite alone: `npm run test -- src/infrastructure/db/Db.test.ts` (plus `test:watc
 - `Runtime.test.ts` — unit pins for the dispatch race fix: `RUN_START_POLICIES` is exactly
   USE_EXISTING + ALLOW_DUPLICATE_FAILED_ONLY, and `rethrowStartError` maps
   `WorkflowExecutionAlreadyStartedError` to `RUN_FROZEN` with the exact wire message while every
-  other error propagates untouched. The describe fast path makes the reuse policy unreachable in
-  deterministic scenarios, so these constants ARE the behavior — without the pin a silent
-  regression would survive every other suite.
+  other error propagates untouched. The policy's allow direction (start after a FAILED/TERMINATED
+  execution) is exercised live by ApiIntegration's terminate-then-retry leg; its refuse direction
+  (never over a COMPLETED execution) is reachable only in the describe/start race window, which
+  no deterministic test can enter — for that half, this pin is the only guard.
 - `Db.test.ts` — ledger semantics (revive, convergence, idempotent completion, derived origin,
   reverse-edge lineage, input edges), hygiene semantics (first-filer `created_*`, stamped
   updates, promotion provenance, dormant `deleted_at`, principal guards at every write
@@ -697,8 +703,13 @@ suite alone: `npm run test -- src/infrastructure/db/Db.test.ts` (plus `test:watc
   run → 409, then a no-change revision replaying entirely from memo — zero executed node
   bodies — plus the attach-on-frozen probe and a copy-plus-new-docs partial recompute);
   auto-skipped without `TEMPORAL_API_KEY` in `backend/.env`. This is the only coverage of the
-  dispatch path — including the ALLOW_DUPLICATE_FAILED_ONLY reuse policy — and live memo replay;
-  its memo-hit counts are the regression suite for the memo-key formula.
+  dispatch path over HTTP and the only live exercise of the ALLOW_DUPLICATE_FAILED_ONLY reuse
+  policy (the terminate-then-retry leg); live memo replay and the memo-hit counts that pin the
+  memo-key formula are covered both here and in the demo scenario goldens (next bullet).
+- `DemoScenario.test.ts` — the golden-file black-box scenarios: every `demo_tests/` input
+  replayed over real Temporal and byte-compared against its committed output; auto-skipped
+  without `TEMPORAL_API_KEY`, like ApiIntegration.test.ts — the full contract is in "Demo
+  scenario tests (the e2e proxy)" at the end.
 
 ## Known accepted gaps (decisions, not oversights)
 
@@ -787,22 +798,24 @@ demo` makes — create, upload, copy, execute with the embedded worker and the a
 answering `verify_txns` — under the test's own isolation (scratch db and store, real Temporal
 on a unique per-scenario task queue, a fresh instance prefix), then reads the scratch db
 DIRECTLY (`listWorkflowRuns`, `stats`, `workflowRunArtifacts`, payload reads) and renders
-executions, the lineage table, engagement stats, rejected commands (with their exact messages
-and 409 codes), and requested final reports into deterministic markdown. It drives the Db/
-Runtime layer, not HTTP — route-owned behavior (the describeRun copyability gate on
-running/idle parents, upload-with-attach's frozen-check-before-filing) is pinned by
-ApiCrud.test.ts and ApiIntegration.test.ts, not here.
+executions, the lineage table, engagement stats, rejected commands (exact messages, plus the
+409 code when the refusal carries one), and requested final reports into deterministic
+markdown. It drives the Db/Runtime layer, not HTTP — route-owned behavior (the describeRun
+copyability gate on running/idle parents, upload-with-attach's frozen-check-before-filing) is
+pinned by ApiCrud.test.ts and ApiIntegration.test.ts, not here.
 
 The step grammar (one line per step; `fail ` prefix means the command must be refused by the
-PRODUCT — harness errors rethrow, so a typo cannot mint a golden): `engagement`,
-`run … = create`, `run … = copy <parent> <copy|revision|simulation|root>` (`root` is legal only
-so a `fail` step can demonstrate the pairing refusal), `upload`, `answers` (the questionnaire
-channel), `detach`, `execute`, `report` — documented at the top of `DemoScenario.ts`. The five
-shipped scenarios: January from scratch (root + freeze), the no-change revision (pure memo
-replay across a family), the February period copy (marginal recompute only), the guardrails
-(the RUN_FROZEN / RUN_NOT_COPYABLE / pairing refusals reachable from the Db layer, each with
-its exact message), and simulations (three residencies, one family — including the convergence
-finding that byte-identical reports from distinct questions file as ONE artifact).
+PRODUCT — harness errors carry the `demo harness:` prefix and rethrow, so a typo cannot mint a
+golden): `engagement`, `run … = create`,
+`run … = copy <parent> <copy|revision|simulation|root> [workflow=<id>]` (the `workflow=` tail is
+how scenario 4 expresses the workflow-mismatch refusal; `root` is legal only so a `fail` step
+can demonstrate the pairing refusal), `upload`, `answers` (the questionnaire channel), `detach`,
+`execute`, `report` — documented at the top of `DemoScenario.ts`. The five shipped scenarios: January from scratch (root + freeze), the
+no-change revision (pure memo replay across a family), the February period copy (marginal
+recompute only), the guardrails (the RUN_FROZEN / RUN_NOT_COPYABLE / workflow-mismatch /
+pairing refusals reachable from the Db layer, each with its exact message), and simulations
+(three residencies, one family — including the convergence finding that byte-identical reports
+from distinct questions file as ONE artifact).
 
 The suite is part of `npm run test` (so `npm run check` runs it after every change) and
 auto-skips without `TEMPORAL_API_KEY`, like ApiIntegration.test.ts. After an INTENTIONAL
